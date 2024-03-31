@@ -11,13 +11,20 @@ for (x in packages) {
 ################################################################################
 
 covid <- read_xlsx("D:/Data/Training samples/misinformation_labeled.xlsx")
+covid_links <- readRDS("D:/Data/covid_misinfo_links.RDS")
+
+covid_links <- covid_links |>
+  select(-dom_url)
+
+covid_full <- rbind(covid_links, covid)
+covid <- covid_full
 
 stopwords <- read_xlsx("~/INORK/INORK_R/Processing/stopwords.xlsx")
 custom_words <- stopwords |>
   pull(word)
 
 covid <- covid |>
-  select(tweet = text, label, id, conversation_id, date)
+  select(tweet = text, label, id)
 
 # Some preprocessing
 covid$label <- as.factor(covid$label) # Outcome variable needs to be factor
@@ -36,9 +43,9 @@ covid$tweet <- apply(covid["tweet"], 1, removeURL)
 covid |>
   count(label) # the classes are pretty imbalanced
 
-covid_os <- ovun.sample(label~., data = covid, method = "both", p = 0.5, seed = 1234)$data
-# match <- subset(covid, !(covid$id %in% covid_os$id))
-# covid_os <- rbind(covid_os, match)
+covid_os <- ovun.sample(label~., data = covid, method = "over", p = 0.3, seed = 1234)$data
+match <- subset(covid, !(covid$id %in% covid_os$id))
+covid_os <- rbind(covid_os, match)
 
 covid_os |>
   count(label) # a bit better now
@@ -79,12 +86,12 @@ svm_model <- svm(formula = label~.,
 test_svm <- predict(svm_model, new_test)
 test_svm <- bind_cols(new_test, test_svm)
 test_svm |>
-  accuracy(truth = label, estimate = ...1002) # 0.966
+  accuracy(truth = label, estimate = ...1002) # 0.966 (0.894 with links)
 
 new_test |>
   bind_cols(predict(svm_model, new_test)) |>
   conf_mat(truth = label, estimate = ...1002) |>
-  autoplot(type = "heatmap") # 10 FN, 2 FP
+  autoplot(type = "heatmap") # 10 FN, 112 FP
 
 ################################################################################
 ## Tuning time
