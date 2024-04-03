@@ -11,13 +11,6 @@ for (x in packages) {
 
 ################################################################################
 covid <- read_xlsx("D:/Data/Training samples/misinformation_labeled.xlsx")
-covid_links <- readRDS("D:/Data/covid_misinfo_links.RDS")
-
-covid_links <- covid_links |>
-  select(-dom_url)
-
-covid_full <- rbind(covid_links, covid)
-covid <- covid_full
 
 stopwords <- read_xlsx("~/INORK/INORK_R/Processing/stopwords.xlsx")
 custom_words <- stopwords |>
@@ -41,18 +34,20 @@ covid$tweet <- apply(covid["tweet"], 1, removeUsernames)
 covid$label <- as.factor(covid$label) # Outcome variable needs to be factor
 covid$tweet <- tolower(covid$tweet)
 covid$tweet <- gsub("[[:punct:]]", " ", covid$tweet)
-covid$tweet <- str_replace_all(covid$tweet, "[0-9]", "")
+# covid$tweet <- str_replace_all(covid$tweet, "[0-9]", "")
 
 ################################################################################
 covid |>
-  count(label) # the classes are pretty imbalanced
+  count(label) # the classes are pretty imbalanced, 79/973
 
-covid_os <- ovun.sample(label~., data = covid, method = "over", p = 0.3, seed = 1234)$data
+covid_os <- ovun.sample(label~., data = covid, method = "both", p = 0.2, seed = 1234)$data
 match <- subset(covid, !(covid$id %in% covid_os$id))
+match <- match |>
+  filter(label == 1)
 covid_os <- rbind(covid_os, match)
 
 covid_os |>
-  count(label) # a bit better now
+  count(label) # a bit better now, 221/832
 
 ################################################################################
 set.seed(1234)
@@ -90,34 +85,34 @@ svm_model <- svm(formula = label~.,
 test_svm <- predict(svm_model, new_test)
 test_svm <- bind_cols(new_test, test_svm)
 test_svm |>
-  accuracy(truth = label, estimate = ...1002) # 0.939
+  accuracy(truth = label, estimate = ...1002) # 0.920
 
 cm_svm_test <- confusionMatrix(table(new_test$label, test_svm$...1002)) 
-cm_svm_test$byClass["F1"] #
+cm_svm_test$byClass["F1"] # 0.952
 
 new_test |>
   bind_cols(predict(svm_model, new_test)) |>
   conf_mat(truth = label, estimate = ...1002) |>
-  autoplot(type = "heatmap") # 22 FN, 54 FP
+  autoplot(type = "heatmap") # 17 FN, 0 FP
 
 ################################################################################
 ## Tuning time
 set.seed(1234)
 svm_tune <- tune.svm(x = label ~., 
                      data = new_train,
-                     gamma = seq(0.09,0.11, by = 0.005), 
-                     cost = seq(0.8,1, by = 0.05), 
+                     gamma = seq(0,0.1, by = 0.01), 
+                     cost = seq(0.1,1, by = 0.1), 
                      kernel = "radial")
 
-svm_tune$best.parameters$gamma # 0.1
-svm_tune$best.parameters$cost # 0.9
+svm_tune$best.parameters$gamma # 0.01
+svm_tune$best.parameters$cost # 0.8
 
 set.seed(1234)
 svm_tune_2 <- tune.svm(x = label ~., 
-                     data = new_train,
-                     gamma = seq(0.09,0.11, by = 0.005), 
-                     cost = seq(0.8,2, by = 0.05), 
-                     kernel = "radial")
+                       data = new_train,
+                       gamma = seq(0.001,0.01, by = 0.001), 
+                       cost = seq(0.7,9, by = 0.05), 
+                       kernel = "radial")
 
 svm_tune_2$best.parameters$gamma # 0.02
 svm_tune_2$best.parameters$cost # 0.55
