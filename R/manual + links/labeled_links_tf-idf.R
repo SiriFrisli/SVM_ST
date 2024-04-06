@@ -10,16 +10,18 @@ for (x in packages) {
 }
 
 ################################################################################
-covid <- read_xlsx("D:/Data/Training samples/misinformation_labeled.xlsx")
-covid_links <- readRDS("D:/Data/covid_misinfo_links.RDS")
+covid_manual <- read_xlsx("E:/Data/Training samples/misinformation_labeled.xlsx")
+covid_links <- readRDS("E:/Data/covid_misinfo_links_only.RDS")
 
 covid_links <- covid_links |>
   select(-dom_url)
 
-covid_full <- rbind(covid_links, covid)
-covid <- covid_full
+covid_manual <- covid_manual |>
+  select(-c(claim, description, fact_check, date))
 
-stopwords <- read_xlsx("~/INORK/INORK_R/Processing/stopwords.xlsx")
+covid <- rbind(covid_links, covid_manual)
+
+stopwords <- read_xlsx("~/INORK/Processing/stopwords.xlsx")
 custom_words <- stopwords |>
   pull(word)
 
@@ -41,14 +43,16 @@ covid$tweet <- apply(covid["tweet"], 1, removeUsernames)
 covid$label <- as.factor(covid$label) # Outcome variable needs to be factor
 covid$tweet <- tolower(covid$tweet)
 covid$tweet <- gsub("[[:punct:]]", " ", covid$tweet)
-covid$tweet <- str_replace_all(covid$tweet, "[0-9]", "")
+# covid$tweet <- str_replace_all(covid$tweet, "[0-9]", "")
 
 ################################################################################
 covid |>
-  count(label) # the classes are pretty imbalanced
+  count(label) # the classes are pretty imbalanced, 0=973, 1=4398
 
-covid_os <- ovun.sample(label~., data = covid, method = "over", p = 0.3, seed = 1234)$data
+covid_os <- ovun.sample(label~., data = covid, method = "both", p = 0.2, seed = 1234)$data
 match <- subset(covid, !(covid$id %in% covid_os$id))
+match <- match |>
+  filter(label == 0)
 covid_os <- rbind(covid_os, match)
 
 covid_os |>
@@ -89,16 +93,13 @@ svm_model <- svm(formula = label~.,
 
 test_svm <- predict(svm_model, new_test)
 test_svm <- bind_cols(new_test, test_svm)
-test_svm |>
-  accuracy(truth = label, estimate = ...1002) # 0.939
-
-cm_svm_test <- confusionMatrix(table(new_test$label, test_svm$...1002)) 
-cm_svm_test$byClass["F1"] #
+cm_svm <- confusionMatrix(table(new_test$label, test_svm$...1002)) 
+cm_svm$byClass["F1"] # 0.962
 
 new_test |>
   bind_cols(predict(svm_model, new_test)) |>
   conf_mat(truth = label, estimate = ...1002) |>
-  autoplot(type = "heatmap") # 22 FN, 54 FP
+  autoplot(type = "heatmap") # 13 FN, 54 FP
 
 ################################################################################
 ## Tuning time
@@ -109,18 +110,38 @@ svm_tune <- tune.svm(x = label ~.,
                      cost = seq(0.8,1, by = 0.05), 
                      kernel = "radial")
 
-svm_tune$best.parameters$gamma # 0.1
-svm_tune$best.parameters$cost # 0.9
+svm_tune$best.parameters$gamma # 0.09
+svm_tune$best.parameters$cost # 0.8
 
 set.seed(1234)
 svm_tune_2 <- tune.svm(x = label ~., 
                      data = new_train,
-                     gamma = seq(0.09,0.11, by = 0.005), 
-                     cost = seq(0.8,2, by = 0.05), 
+                     gamma = seq(0.01,0.09, by = 0.005), 
+                     cost = seq(0.01,0.8, by = 0.05), 
                      kernel = "radial")
 
-svm_tune_2$best.parameters$gamma # 0.02
-svm_tune_2$best.parameters$cost # 0.55
+svm_tune_2$best.parameters$gamma # 0.01
+svm_tune_2$best.parameters$cost # 0.71
+
+set.seed(1234)
+svm_tune_3 <- tune.svm(x = label ~., 
+                       data = new_train,
+                       gamma = 10^(-3:3), 
+                       cost = c(0.01, 0.1, 1, 10, 100, 1000), 
+                       kernel = "radial")
+
+svm_tune_3$best.parameters$gamma # 0.001
+svm_tune_3$best.parameters$cost # 1000
+
+set.seed(1234)
+svm_tune_4 <- tune.svm(x = label ~., 
+                       data = new_train,
+                       gamma = seq(0.000, 0.001, by = 0.0002), 
+                       cost = c(500, 800, 1000, 1200, 1500), 
+                       kernel = "radial")
+
+svm_tune_3$best.parameters$gamma # 0.001
+svm_tune_3$best.parameters$cost # 1000
 
 ################################################################################
 ## Training the finished model
@@ -130,24 +151,29 @@ svm_model <- svm(formula = label~.,
                  type = "C-classification",
                  kernel = "radial",
                  cross = 5,
-                 gamma = 0.02,
-                 cost = 0.55,
+                 gamma = 0.001,
+                 cost = 1000,
                  probability = TRUE)
 
 model_svm <- new_test |>
   bind_cols(predict(svm_model, new_test))
 
 cm_svm <- confusionMatrix(table(new_test$label, model_svm$...1002)) 
-cm_svm$byClass["F1"] # 0.981
+cm_svm$byClass["F1"] # 0.9687
+cm_svm$byClass["Recall"] # 0.9631336 
+cm_svm$byClass["Precision"] # 0.974359 
 
 new_test |>
   bind_cols(predict(svm_model, new_test)) |>
   conf_mat(truth = label, estimate = ...1002) |>
-  autoplot(type = "heatmap") # 7 FN, 0 FP
+  autoplot(type = "heatmap") # 22 FN, 32 FP
+
+
+##  DO NOT RUN THE CODE BELOW ##
 
 ################################################################################
 ## Loading the full data set and cleaning it
-covid_df <- readRDS("D:/Data/covid_relevant_filtered.RDS")
+covid_df <- readRDS("D:/Data/covid_relevant_filtered.RDS") # update data 
 
 match <- subset(covid, (covid$id %in% covid_df$id))
 covid_df <- covid_df |>
