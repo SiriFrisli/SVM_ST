@@ -168,322 +168,177 @@ new_test |>
   conf_mat(truth = label, estimate = ...1002) |>
   autoplot(type = "heatmap") # 22 FN, 32 FP
 
-
-##  DO NOT RUN THE CODE BELOW ##
-
 ################################################################################
-## Loading the full data set and cleaning it
-covid_df <- readRDS("D:/Data/covid_relevant_filtered.RDS") # update data 
+## TRAINING RANDOM FOREST
+control <- trainControl(method = "cv",
+                        number = 5,
+                        search = "grid")
 
-match <- subset(covid, (covid$id %in% covid_df$id))
-covid_df <- covid_df |>
-  anti_join(match, by = "id")
-
-covid_full <- covid_df |>
-  sample_n(50000, seed = 1234)
-
-# Removing urls and usernames
-removeURL <- function(tweet) {
-  return(gsub("http\\S+", "", tweet))
-}
-
-removeUsernames <- function(tweet) {
-  return(gsub("@[a-z,A-Z,_]*[0-9]*[a-z,A-Z,_]*[0-9]*", "", tweet))
-}
-
-covid_full$text <- apply(covid_full["text"], 2, removeURL)
-covid_full$text <- apply(covid_full["text"], 2, removeUsernames)
-
-covid_full$text <- tolower(covid_full$text )
-covid_full$text <- gsub("[[:punct:]]", " ", covid_full$text)
-covid_full$text <- str_replace_all(covid_full$text , "[0-9]", "")
-
-covid_full <- covid_full |>
-  rename(tweet = text)
-
-################################################################################
-## Using the sVM to predict on the larger data
-covid_full_baked <- bake(covid_recipe, new_data = covid_full)
-
-covid_full_pred <- predict(svm_model, covid_full_baked, probability = TRUE)
-covid_full_pred_probs <- attr(covid_full_pred, "probabilities")
-covid_full_pred_probs <- covid_full_pred_probs |>
-  as.data.frame() |>
-  select(not_misinfo = "0", misinfo = "1")
-
-covid_full_pred_df <- bind_cols(covid_full, covid_full_pred_probs)
-covid_full_pred_df <- covid_full_pred_df |>
-  filter(not_misinfo > 0.999 | misinfo > 0.9)
-
-covid_full_pred_df_label <- covid_full_pred_df |>
-  mutate(label = case_when(
-    misinfo > 0.9 ~ "1",
-    not_misinfo > 0.999 ~ "0"
-  ))
-
-covid_full_pred_df_label <- covid_full_pred_df_label |>
-  select(tweet, label, id, conversation_id, date)
-
-covid_predicted <- full_join(covid_full_pred_df_label, covid)
-
-saveRDS(covid_predicted, "D:/Data/Training samples/misinformation_labeled_2.RDS")
-
-################################################################################
-## Training a new model on the larger data
-
-covid <- readRDS("D:/Data/Training samples/misinformation_labeled_2.RDS")
-
-covid |>
-  count(label) # the classes are pretty imbalanced
-
-covid_os <- ovun.sample(label~., data = covid, method = "both", p = 0.5, seed = 1234)$data
-# match <- subset(covid, !(covid$id %in% covid_os$id))
-# covid_os <- rbind(covid_os, match)
-
-covid_os |>
-  count(label) # a bit better now
-
-################################################################################
 set.seed(1234)
-covid_split <- initial_split(covid_os, prop = 0.8, strata = label)
-train <- training(covid_split)
-test <- testing(covid_split)
+rf_default <- train(label~., 
+                    data = new_train, 
+                    method = "rf",
+                    metric = "Accuracy", 
+                    maximize = TRUE,
+                    trControl = control)
+rf_default # mtry = 1000 gives acc = 0.9804, and mtry = 44 gives acc = 0.9802
 
-spacy_initialize(model = "nb_core_news_sm")
-# glove27b <- embedding_glove27b(dimensions = 200, manual_download = TRUE) 
+tunegrid <- expand.grid(.mtry = (40:50))
+rf_grid <- train(label~., 
+                 data = new_train, 
+                 method = "rf",
+                 metric = "Accuracy", 
+                 maximize = TRUE,
+                 tuneGrid = tunegrid)
 
-covid_recipe <- recipe(label~tweet, data = covid_os) |>
+print(rf_grid) #
+
+best_mtry <- 50 # acc = 0.97656
+best_grid <- expand.grid(.mtry = best_mtry)
+
+store_maxtrees <- list()
+for (ntree in c(300, 400, 500, 600, 700, 800, 900, 1000)) {
+  set.seed(1234)
+  rf_maxtrees <- train(label~.,
+                       data = new_train,
+                       method = "rf",
+                       metric = "Accuracy",
+                       tuneGrid = best_grid,
+                       trControl = control,
+                       importance = TRUE,
+                       nodesize = 10,
+                       ntree = ntree)
+  key <- toString(ntree)
+  store_maxtrees[[key]] <- rf_maxtrees
+}
+results_tree <- resamples(store_maxtrees)
+summary(results_tree) # 400 acc = 0.9846
+
+rf_model <- train(label~.,
+                  data = new_train,
+                  method = "rf",
+                  metric = "Accuracy",
+                  tuneGrid = best_grid,
+                  trControl = control,
+                  importance = TRUE,
+                  nodesize = 1,
+                  ntree = 400)
+
+model_rf <- new_test |>
+  bind_cols(predict(rf_model, new_test))
+
+rf_pred <- predict(rf_model, new_test)
+rf_pred <- bind_cols(test, rf_pred)
+
+cm_rf <- confusionMatrix(table(new_test$label, model_rf$...1002)) 
+cm_rf$byClass["F1"] # 0.9871
+cm_rf$byClass["Precision"] # 0.9825
+cm_rf$byClass["Recall"] # 0.99176
+
+new_test |>
+  bind_cols(predict(rf_model, new_test)) |>
+  conf_mat(truth = label, estimate = ...1002) |>
+  autoplot(type = "heatmap") # 15 FN, 7 FP
+
+
+################################################################################
+## TRAINING LOGISTIC REGRESSION
+
+# creating a new recipe, no prep
+reg_recipe <- recipe(label~tweet, data=covid_os) |>
   step_tokenize(tweet, engine = "spacyr") |>
+  # step_date(date, features = c("year", "month")) |>
   step_stopwords(tweet, language = "no", keep = FALSE, 
                  stopword_source = "snowball", 
                  custom_stopword_source = custom_words) |>
   step_lemma(tweet) |>
   step_tokenfilter(tweet, min_times = 2, max_tokens = 1000) |>
-  step_tfidf(tweet) |>
-  step_normalize(all_predictors()) |>
-  prep()
+  step_tfidf(tweet)
 
-new_train <- bake(covid_recipe, new_data = train)
-new_test <- bake(covid_recipe, new_data = test)
-
-################################################################################
-set.seed(1234)
-svm_model <- svm(formula = label~.,
-                 data = new_train,
-                 type = "C-classification",
-                 kernel = "radial",
-                 cross = 5,
-                 probability = TRUE)
-
-test_svm <- predict(svm_model, new_test)
-test_svm <- bind_cols(new_test, test_svm)
-test_svm |>
-  accuracy(truth = label, estimate = ...1002) # 0.993
-
-new_test |>
-  bind_cols(predict(svm_model, new_test)) |>
-  conf_mat(truth = label, estimate = ...1002) |>
-  autoplot(type = "heatmap") # 0 FN, 5 FP
-
-################################################################################
-## Tuning time
-set.seed(1234) 
-svm_tune <- tune.svm(x = label ~., 
-                     data = new_train,
-                     gamma = seq(0,0.1, by = 0.01), 
-                     cost = seq(0.1,1, by = 0.1), 
-                     kernel = "radial")
-
-svm_tune$best.parameters$gamma # 0.02
-svm_tune$best.parameters$cost # 0.3
+## Ridge penalty
+ridge_spec <- logistic_reg(penalty = 0.01, mixture = 0) |>
+  set_mode("classification") |>
+  set_engine("glmnet")
 
 set.seed(1234)
-svm_tune_2 <- tune.svm(x = label ~., 
-                       data = new_train,
-                       gamma = seq(0,0.02, by = 0.005), 
-                       cost = seq(0.2,0.4, by = 0.05), 
-                       kernel = "radial")
+ridge_fit <- workflow() |>
+  add_recipe(reg_recipe) |>
+  add_model(ridge_spec) |>
+  fit(data = train)
 
-svm_tune_2$best.parameters$gamma # 0.02
-svm_tune_2$best.parameters$cost # 0.3
+ridge_preds <- predict(ridge_fit, test)
+ridge_preds <- bind_cols(test, ridge_preds)
 
-################################################################################
-## Training the new model
+ridge_preds |>
+  accuracy(truth = label, estimate = .pred_class) # 0.963
 
-svm_model <- svm(formula = label~.,
-                 data = new_train,
-                 type = "C-classification",
-                 kernel = "radial",
-                 cross = 5,
-                 gamma = 0.02,
-                 cost = 0.3,
-                 probability = TRUE)
+test |>
+  bind_cols(predict(ridge_fit, test)) |>
+  conf_mat(truth = label, estimate = .pred_class) |>
+  autoplot(type = 'heatmap') # 15 FN, 27 FP
 
-test_svm <- predict(svm_model, new_test)
-test_svm <- bind_cols(new_test, test_svm)
-test_svm |>
-  accuracy(truth = label, estimate = ...1002) # 0.999
+## LASSO penalty
+lasso_spec <- logistic_reg(penalty = 0.01, mixture = 1) |>
+  set_mode("classification") |>
+  set_engine("glmnet")
 
-new_test |>
-  bind_cols(predict(svm_model, new_test)) |>
-  conf_mat(truth = label, estimate = ...1002) |>
-  autoplot(type = "heatmap") # 1 false positive, 0 false negatives
+set.seed(1234)
+lasso_fit <- workflow() |>
+  add_recipe(reg_recipe) |>
+  add_model(lasso_spec) |>
+  fit(data = train)
 
-################################################################################
-## Loading the full data set and cleaning it
-covid_df <- readRDS("D:/Data/covid_relevant_filtered.RDS")
+lasso_preds <- predict(lasso_fit, test)
+lasso_preds <- bind_cols(test, lasso_preds)
 
-match <- subset(covid, (covid$id %in% covid_df$id))
-covid_df <- covid_df |>
-  anti_join(match, by = "id")
+lasso_preds |>
+  accuracy(truth = label, estimate = .pred_class) # 0.968
 
-covid_full <- covid_df |>
-  sample_n(50000, seed = 4321)
+test |>
+  bind_cols(predict(lasso_fit, test)) |>
+  conf_mat(truth = label, estimate = .pred_class) |>
+  autoplot(type = 'heatmap') # 26 FN, 10 FP
 
-# Removing urls and usernames
-removeURL <- function(tweet) {
-  return(gsub("http\\S+", "", tweet))
-}
+## Tuning LASSO
+set.seed(1234)
+train_boot <- bootstraps(train, strata = label)
 
-removeUsernames <- function(tweet) {
-  return(gsub("@[a-z,A-Z,_]*[0-9]*[a-z,A-Z,_]*[0-9]*", "", tweet))
-}
+lasso_tune_spec <- logistic_reg(penalty = tune(), mixture = 1) |>
+  set_mode("classification") |>
+  set_engine("glmnet")
 
-covid_full$text <- apply(covid_full["text"], 2, removeURL)
-covid_full$text <- apply(covid_full["text"], 2, removeUsernames)
+lambda_grid <- grid_regular(penalty(), levels = 50)
 
-covid_full$text <- tolower(covid_full$text )
-covid_full$text <- gsub("[[:punct:]]", " ", covid_full$text)
-covid_full$text <- str_replace_all(covid_full$text , "[0-9]", "")
+lasso_tune_wf <- workflow() |>
+  add_recipe(reg_recipe) |>
+  add_model(lasso_tune_spec)
 
-covid_full <- covid_full |>
-  rename(tweet = text)
+set.seed(1234)
+lasso_grid <- tune_grid(lasso_tune_wf,
+                        resamples = train_boot,
+                        grid = lambda_grid)
 
-################################################################################
-## Using the sVM to predict on the larger data
-covid_full_baked <- bake(covid_recipe, new_data = covid_full)
+lasso_grid|>
+  collect_metrics()
 
-covid_full_pred <- predict(svm_model, covid_full_baked, probability = TRUE)
-covid_full_pred_probs <- attr(covid_full_pred, "probabilities")
-covid_full_pred_probs <- covid_full_pred_probs |>
-  as.data.frame() |>
-  select(not_misinfo = "0", misinfo = "1")
+best_acc <- lasso_grid |>
+  select_best("accuracy")
 
-covid_full_pred_df <- bind_cols(covid_full, covid_full_pred_probs)
-covid_full_pred_df <- covid_full_pred_df |>
-  filter(not_misinfo > 0.9999 | misinfo > 0.9)
+final_lasso <- finalize_workflow(
+  lasso_tune_wf,
+  best_acc) |>
+  fit(data = train)
 
-covid_full_pred_df_label <- covid_full_pred_df |>
-  mutate(label = case_when(
-    misinfo > 0.9 ~ "1",
-    not_misinfo > 0.9999 ~ "0"
-  ))
+lasso_tune_preds <- test |>
+  bind_cols(predict(final_lasso, test))
 
-covid_full_pred_df_label <- covid_full_pred_df_label |>
-  select(tweet, label, id, conversation_id, date)
+cm_lasso <- confusionMatrix(table(test$label, lasso_tune_preds$.pred_class)) 
+cm_lasso$byClass["F1"] # 0.9859155 
+cm_lasso$byClass["Precision"] # 0.979021 
+cm_lasso$byClass["Recall"] # 0.9929078 
 
-covid_predicted <- full_join(covid_full_pred_df_label, covid)
-covid_predicted$date <- as.character(covid_predicted$date)
+test |>
+  bind_cols(predict(final_lasso, test)) |>
+  conf_mat(truth = label, estimate = .pred_class) |>
+  autoplot(type = 'heatmap') # 18 FN, 6 FP
 
-saveRDS(covid_predicted, "D:/Data/Training samples/misinformation_labeled_3.RDS")
-
-################################################################################
-## Training a new model on the larger data
-
-covid <- readRDS("D:/Data/Training samples/misinformation_labeled_3.RDS")
-
-covid |>
-  count(label) # the classes are pretty imbalanced
-
-covid_os <- ovun.sample(label~., data = covid, method = "both", p = 0.1, seed = 4321)$data
-# match <- subset(covid, !(covid$id %in% covid_os$id))
-# covid_os <- rbind(covid_os, match)
-
-covid_os |>
-  count(label) # a bit better now
-
-################################################################################
-set.seed(134)
-covid_split <- initial_split(covid_os, prop = 0.8, strata = label)
-train <- training(covid_split)
-test <- testing(covid_split)
-
-spacy_initialize(model = "nb_core_news_sm")
-# glove27b <- embedding_glove27b(dimensions = 200, manual_download = TRUE) 
-
-covid_recipe <- recipe(label~tweet, data = covid_os) |>
-  step_tokenize(tweet, engine = "spacyr") |>
-  step_stopwords(tweet, language = "no", keep = FALSE, 
-                 stopword_source = "snowball", 
-                 custom_stopword_source = custom_words) |>
-  step_lemma(tweet) |>
-  step_tokenfilter(tweet, min_times = 2, max_tokens = 1000) |>
-  step_tfidf(tweet) |>
-  step_normalize(all_predictors()) |>
-  prep()
-
-new_train <- bake(covid_recipe, new_data = train)
-new_test <- bake(covid_recipe, new_data = test)
-
-################################################################################
-set.seed(12)
-svm_model <- svm(formula = label~.,
-                 data = new_train,
-                 type = "C-classification",
-                 kernel = "radial",
-                 cross = 5,
-                 probability = TRUE)
-
-test_svm <- predict(svm_model, new_test)
-test_svm <- bind_cols(new_test, test_svm)
-test_svm |>
-  accuracy(truth = label, estimate = ...1002) # 0.982
-
-new_test |>
-  bind_cols(predict(svm_model, new_test)) |>
-  conf_mat(truth = label, estimate = ...1002) |>
-  autoplot(type = "heatmap") # 22 FN, 0 FP
-
-################################################################################
-## Tuning time
-set.seed(123) 
-svm_tune <- tune.svm(x = label ~., 
-                     data = new_train,
-                     gamma = seq(0,0.1, by = 0.01), 
-                     cost = seq(0.1,1, by = 0.1), 
-                     kernel = "radial")
-
-svm_tune$best.parameters$gamma # 0.04
-svm_tune$best.parameters$cost # 0.9
-
-set.seed(4321)
-svm_tune_2 <- tune.svm(x = label ~., 
-                       data = new_train,
-                       gamma = seq(0.03,0.05, by = 0.005), 
-                       cost = seq(0.8,1, by = 0.05), 
-                       kernel = "radial")
-
-svm_tune_2$best.parameters$gamma # 0.035
-svm_tune_2$best.parameters$cost # 0.95
-
-################################################################################
-## Training the new model
-
-svm_model <- svm(formula = label~.,
-                 data = new_train,
-                 type = "C-classification",
-                 kernel = "radial",
-                 cross = 5,
-                 gamma = 0.035,
-                 cost = 0.95,
-                 probability = TRUE)
-
-test_svm <- predict(svm_model, new_test)
-test_svm <- bind_cols(new_test, test_svm)
-test_svm |>
-  accuracy(truth = label, estimate = ...1002) # 0.986
-
-new_test |>
-  bind_cols(predict(svm_model, new_test)) |>
-  conf_mat(truth = label, estimate = ...1002) |>
-  autoplot(type = "heatmap") # 0 FP, 17 FN
