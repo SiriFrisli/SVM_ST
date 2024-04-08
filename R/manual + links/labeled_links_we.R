@@ -51,12 +51,14 @@ covid$tweet <- gsub("[[:punct:]]", " ", covid$tweet)
 covid |>
   count(label) # 973/4398
 
-covid_os <- ovun.sample(label~., data = covid, method = "over", p = 0.3, seed = 1234)$data
+covid_os <- ovun.sample(label~., data = covid, method = "both", p = 0.2, seed = 1234)$data
 match <- subset(covid, !(covid$id %in% covid_os$id))
+match <- match |>
+  filter(label == 0)
 covid_os <- rbind(covid_os, match)
 
 covid_os |>
-  count(label) # 1964/4398
+  count(label) # 1401/4287
 
 ################################################################################
 set.seed(1234)
@@ -72,7 +74,6 @@ no_we$V1 <- gsub("▁", "", no_we$V1)
 
 ################################################################################
 ## TRAINING SVM MODEL
-
 covid_recipe <- recipe(label~tweet, data = covid_os) |>
   step_tokenize(tweet, engine = "spacyr") |>
   # step_date(date, features = c("year", "month")) |>
@@ -99,15 +100,15 @@ svm_model <- svm(formula = label~.,
 test_svm <- predict(svm_model, new_test)
 test_svm <- bind_cols(new_test, test_svm)
 test_svm |>
-  accuracy(truth = label, estimate = ...202) # 0.910
+  accuracy(truth = label, estimate = ...202) # 0.846
 
 cm_svm_test <- confusionMatrix(table(new_test$label, test_svm$...202)) 
-cm_svm_test$byClass["F1"] # 0.9459
+cm_svm_test$byClass["F1"] # 0.9061662 
 
 new_test |>
   bind_cols(predict(svm_model, new_test)) |>
   conf_mat(truth = label, estimate = ...202) |>
-  autoplot(type = "heatmap") # 1 FP, 18 FN
+  autoplot(type = "heatmap") # 13 FN, 162 FP
 
 ################################################################################
 ## Tuning time
@@ -118,18 +119,18 @@ svm_tune <- tune.svm(x = label ~.,
                      cost = c(0.01, 0.1, 1, 10, 100, 1000),  
                      kernel = "radial")
 
-svm_tune$best.parameters$gamma # 0.1
-svm_tune$best.parameters$cost # 1
+svm_tune$best.parameters$gamma # 0.01
+svm_tune$best.parameters$cost # 10
 
 set.seed(1234)
 svm_tune_2 <- tune.svm(x = label ~., 
                        data = new_train,
-                       gamma = seq(0,0.1, by = 0.01), 
-                       cost = seq(0.1,2, by = 0.1), 
+                       gamma = seq(0,0.01, by = 0.002), 
+                       cost = seq(5,15, by = 1), 
                        kernel = "radial")
 
-svm_tune_2$best.parameters$gamma # 0.07
-svm_tune_2$best.parameters$cost # 0.9
+svm_tune_2$best.parameters$gamma # 0.006
+svm_tune_2$best.parameters$cost # 8
 
 ################################################################################
 ## Training the finished model
@@ -139,8 +140,8 @@ svm_model <- svm(formula = label~.,
                  type = "C-classification",
                  kernel = "radial",
                  cross = 5,
-                 gamma = 0.07,
-                 cost = 0.9,
+                 gamma = 0.006,
+                 cost = 8,
                  probability = TRUE)
 
 model_svm <- new_test |>
@@ -150,14 +151,14 @@ svm_pred <- predict(svm_model, new_test)
 svm_pred <- bind_cols(test, svm_pred)
 
 cm_svm <- confusionMatrix(table(new_test$label, model_svm$...202)) 
-cm_svm$byClass["F1"] # 0.9681159 
-cm_svm$byClass["Precision"] # 1
-cm_svm$byClass["Recall"] # 0.8030303
+cm_svm$byClass["F1"] # 0.9101124
+cm_svm$byClass["Precision"] # 0.9440559
+cm_svm$byClass["Recall"] # 0.8785249
 
 new_test |>
   bind_cols(predict(svm_model, new_test)) |>
   conf_mat(truth = label, estimate = ...202) |>
-  autoplot(type = "heatmap") # 0 FP, 11 FN
+  autoplot(type = "heatmap") # 48 FN, 11 FP
 
 ################################################################################
 ## TRAINING RANDOM FOREST
@@ -172,7 +173,7 @@ rf_default <- train(label~.,
                     metric = "Accuracy", 
                     maximize = TRUE,
                     trControl = control)
-rf_default # mtry = 2, acc = 0.95959
+rf_default # 
 
 tunegrid <- expand.grid(.mtry = 1:30)
 rf_grid <- train(label~., 
@@ -182,7 +183,7 @@ rf_grid <- train(label~.,
                  maximize = TRUE,
                  tuneGrid = tunegrid)
 
-print(rf_grid) # 14 acc = 0.9463241    
+print(rf_grid) # 
 
 best_mtry <- 7
 best_grid <- expand.grid(.mtry = best_mtry)
@@ -203,7 +204,7 @@ for (ntree in c(50, 100, 200, 400, 500, 1000)) {
   store_maxtrees[[key]] <- rf_maxtrees
 }
 results_tree <- resamples(store_maxtrees)
-summary(results_tree) # 200, acc = 0.9761905    
+summary(results_tree) #    
 
 rf_model <- train(label~.,
                   data = new_train,
@@ -222,14 +223,14 @@ rf_pred <- predict(rf_model, new_test)
 rf_pred <- bind_cols(test, rf_pred)
 
 cm_rf <- confusionMatrix(table(new_test$label, model_rf$...202)) 
-cm_rf$byClass["F1"] # 0.9681159  
-cm_rf$byClass["Precision"] # 1 
-cm_rf$byClass["Recall"] # 0.9382022  
+cm_rf$byClass["F1"] #   
+cm_rf$byClass["Precision"] # 
+cm_rf$byClass["Recall"] #   
 
 new_test |>
   bind_cols(predict(rf_model, new_test)) |>
   conf_mat(truth = label, estimate = ...202) |>
-  autoplot(type = "heatmap") # 0 FP, 11 FN
+  autoplot(type = "heatmap") # 
 
 ################################################################################
 ## TRAINING LOGISTIC REGRESSION
@@ -258,12 +259,12 @@ ridge_preds <- predict(ridge_fit, test)
 ridge_preds <- bind_cols(test, ridge_preds)
 
 ridge_preds |>
-  accuracy(truth = label, estimate = .pred_class) # 0.877
+  accuracy(truth = label, estimate = .pred_class) # 
 
 test |>
   bind_cols(predict(ridge_fit, test)) |>
   conf_mat(truth = label, estimate = .pred_class) |>
-  autoplot(type = 'heatmap') # 9 FN, 17 FP
+  autoplot(type = 'heatmap') # 
 
 ## LASSO penalty
 lasso_spec <- logistic_reg(penalty = 0.01, mixture = 1) |>
@@ -280,12 +281,12 @@ lasso_preds <- predict(lasso_fit, test)
 lasso_preds <- bind_cols(test, lasso_preds)
 
 lasso_preds |>
-  accuracy(truth = label, estimate = .pred_class) # 0.863
+  accuracy(truth = label, estimate = .pred_class) # 
 
 test |>
   bind_cols(predict(lasso_fit, test)) |>
   conf_mat(truth = label, estimate = .pred_class) |>
-  autoplot(type = 'heatmap') # 12 FP, 17 FN
+  autoplot(type = 'heatmap') # 
 
 ## Tuning LASSO
 set.seed(1234)
@@ -321,13 +322,13 @@ lasso_tune_preds <- test |>
   bind_cols(predict(final_lasso, test))
 
 cm_lasso <- confusionMatrix(table(test$label, lasso_tune_preds$.pred_class)) 
-cm_lasso$byClass["F1"] # 0.9130435  
-cm_lasso$byClass["Precision"] # 0.8802395  
-cm_lasso$byClass["Recall"] # 0.9483871  
+cm_lasso$byClass["F1"] #   
+cm_lasso$byClass["Precision"] #   
+cm_lasso$byClass["Recall"] #   
 
 test |>
   bind_cols(predict(final_lasso, test)) |>
   conf_mat(truth = label, estimate = .pred_class) |>
-  autoplot(type = 'heatmap') # 20 FP, 8 FN
+  autoplot(type = 'heatmap') # 
 
 
