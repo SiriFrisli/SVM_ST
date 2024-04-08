@@ -140,9 +140,9 @@ svm_pred <- predict(svm_model, new_test)
 svm_pred <- bind_cols(test, svm_pred)
 
 cm_svm <- confusionMatrix(table(new_test$label, model_svm$...1002)) 
-cm_svm$byClass["F1"] # 0.968
+cm_svm$byClass["F1"] # 0.9681159 
 cm_svm$byClass["Precision"] # 1
-cm_svm$byClass["Recall"] # 0.938
+cm_svm$byClass["Recall"] # 0.9382022 
 
 new_test |>
   bind_cols(predict(svm_model, new_test)) |>
@@ -212,9 +212,9 @@ rf_pred <- predict(rf_model, new_test)
 rf_pred <- bind_cols(test, rf_pred)
 
 cm_rf <- confusionMatrix(table(new_test$label, model_rf$...1002)) 
-cm_rf$byClass["F1"] # 0.968
+cm_rf$byClass["F1"] # 0.9681159 
 cm_rf$byClass["Precision"] # 1
-cm_rf$byClass["Recall"] # 0.938
+cm_rf$byClass["Recall"] # 0.9382022 
 
 new_test |>
   bind_cols(predict(rf_model, new_test)) |>
