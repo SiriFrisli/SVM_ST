@@ -173,9 +173,9 @@ rf_default <- train(label~.,
                     metric = "Accuracy", 
                     maximize = TRUE,
                     trControl = control)
-rf_default # 
+rf_default # mtry = 101, acc = 0.8645878
 
-tunegrid <- expand.grid(.mtry = 1:30)
+tunegrid <- expand.grid(.mtry = 90:110)
 rf_grid <- train(label~., 
                  data = new_train, 
                  method = "rf",
@@ -185,7 +185,7 @@ rf_grid <- train(label~.,
 
 print(rf_grid) # 
 
-best_mtry <- 7
+best_mtry <- 103 # acc = 0.8513829
 best_grid <- expand.grid(.mtry = best_mtry)
 
 store_maxtrees <- list()
@@ -204,7 +204,7 @@ for (ntree in c(50, 100, 200, 400, 500, 1000)) {
   store_maxtrees[[key]] <- rf_maxtrees
 }
 results_tree <- resamples(store_maxtrees)
-summary(results_tree) #    
+summary(results_tree) # 200, acc = 0.8756876  
 
 rf_model <- train(label~.,
                   data = new_train,
@@ -223,14 +223,14 @@ rf_pred <- predict(rf_model, new_test)
 rf_pred <- bind_cols(test, rf_pred)
 
 cm_rf <- confusionMatrix(table(new_test$label, model_rf$...202)) 
-cm_rf$byClass["F1"] #   
-cm_rf$byClass["Precision"] # 
-cm_rf$byClass["Recall"] #   
+cm_rf$byClass["F1"] # 0.9264305 
+cm_rf$byClass["Precision"] # 0.990676 
+cm_rf$byClass["Recall"] # 0.8700102 
 
 new_test |>
   bind_cols(predict(rf_model, new_test)) |>
   conf_mat(truth = label, estimate = ...202) |>
-  autoplot(type = "heatmap") # 
+  autoplot(type = "heatmap") # 8 FN, 127 FP
 
 ################################################################################
 ## TRAINING LOGISTIC REGRESSION
@@ -259,12 +259,12 @@ ridge_preds <- predict(ridge_fit, test)
 ridge_preds <- bind_cols(test, ridge_preds)
 
 ridge_preds |>
-  accuracy(truth = label, estimate = .pred_class) # 
+  accuracy(truth = label, estimate = .pred_class) # 0.795
 
 test |>
   bind_cols(predict(ridge_fit, test)) |>
   conf_mat(truth = label, estimate = .pred_class) |>
-  autoplot(type = 'heatmap') # 
+  autoplot(type = 'heatmap') # 55 FN, 178 FP
 
 ## LASSO penalty
 lasso_spec <- logistic_reg(penalty = 0.01, mixture = 1) |>
@@ -281,12 +281,12 @@ lasso_preds <- predict(lasso_fit, test)
 lasso_preds <- bind_cols(test, lasso_preds)
 
 lasso_preds |>
-  accuracy(truth = label, estimate = .pred_class) # 
+  accuracy(truth = label, estimate = .pred_class) # 0.787
 
 test |>
   bind_cols(predict(lasso_fit, test)) |>
   conf_mat(truth = label, estimate = .pred_class) |>
-  autoplot(type = 'heatmap') # 
+  autoplot(type = 'heatmap') # 22 FN, 221 FP
 
 ## Tuning LASSO
 set.seed(1234)
@@ -322,13 +322,54 @@ lasso_tune_preds <- test |>
   bind_cols(predict(final_lasso, test))
 
 cm_lasso <- confusionMatrix(table(test$label, lasso_tune_preds$.pred_class)) 
-cm_lasso$byClass["F1"] #   
-cm_lasso$byClass["Precision"] #   
-cm_lasso$byClass["Recall"] #   
+cm_lasso$byClass["F1"] # 0.87708  
+cm_lasso$byClass["Precision"] # 0.9522145 
+cm_lasso$byClass["Recall"] # 0.8129353 
 
 test |>
   bind_cols(predict(final_lasso, test)) |>
   conf_mat(truth = label, estimate = .pred_class) |>
-  autoplot(type = 'heatmap') # 
+  autoplot(type = 'heatmap') # 41 FN, 188 FP
 
+## Tuning ridge
+set.seed(1234)
+train_boot <- bootstraps(train, strata = label)
 
+ridge_tune_spec <- logistic_reg(penalty = tune(), mixture = 0) |>
+  set_mode("classification") |>
+  set_engine("glmnet")
+
+lambda_grid <- grid_regular(penalty(), levels = 50)
+
+ridge_tune_wf <- workflow() |>
+  add_recipe(reg_recipe) |>
+  add_model(ridge_tune_spec)
+
+set.seed(1234)
+ridge_grid <- tune_grid(ridge_tune_wf,
+                        resamples = train_boot,
+                        grid = lambda_grid)
+
+ridge_grid |>
+  collect_metrics()
+
+best_acc <- ridge_grid |>
+  select_best("accuracy")
+
+final_ridge <- finalize_workflow(
+  ridge_tune_wf,
+  best_acc) |>
+  fit(data = train)
+
+ridge_tune_preds <- test |>
+  bind_cols(predict(final_ridge, test))
+
+cm_ridge <- confusionMatrix(table(test$label, ridge_tune_preds$.pred_class)) 
+cm_ridge$byClass["F1"] # 0.872074  
+cm_ridge$byClass["Precision"] # 0.9335664   
+cm_ridge$byClass["Recall"] # 0.8181818  
+
+test |>
+  bind_cols(predict(final_ridge, test)) |>
+  conf_mat(truth = label, estimate = .pred_class) |>
+  autoplot(type = 'heatmap') # 57 FN, 178 FP

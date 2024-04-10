@@ -1,6 +1,6 @@
 packages <- c("tidyverse", "tidymodels", "readxl", "recipes", "textrecipes", "tune", 
               "e1071", "tidytext", "caret", "ROSE", "spacyr", "textdata", "lubridate",
-              "glmnet")
+              "glmnet", "kernlab", "randomForest")
 
 for (x in packages) {
   if (!require(x, character.only = TRUE)) {
@@ -20,6 +20,11 @@ custom_words <- stopwords |>
 covid <- covid |>
   select(tweet = text, label, id)
 
+covid$label <- case_when(
+  covid$label == 0 ~ "non.misinfo",
+  covid$label == 1 ~ "misinfo"
+)
+
 # Some preprocessing
 removeURL <- function(tweet) {
   return(gsub("http\\S+", "", tweet))
@@ -38,24 +43,24 @@ covid$tweet <- gsub("[[:punct:]]", " ", covid$tweet)
 # covid$tweet <- str_replace_all(covid$tweet, "[0-9]", "")
 
 ################################################################################
-covid |>
-  count(label) # the classes are pretty imbalanced, 79/973
-
-covid_os <- ovun.sample(label~., data = covid, method = "both", p = 0.2, seed = 1234)$data
-match <- subset(covid, !(covid$id %in% covid_os$id))
-match <- match |>
-  filter(label == 1)
-covid_os <- rbind(covid_os, match)
-
-covid_os |>
-  count(label) # a bit better now, 221/832
-
-################################################################################
 set.seed(1234)
-covid_split <- initial_split(covid_os, prop = 0.8, strata = label)
+covid_split <- initial_split(covid, prop = 0.8, strata = label)
 train <- training(covid_split)
 test <- testing(covid_split)
 
+train |>
+  count(label) # the classes are pretty imbalanced, 64/777
+
+# train_os <- ovun.sample(label~., data = train, method = "both", p = 0.2, seed = 1234)$data
+# match <- subset(train, !(train_os$id %in% train_os$id))
+# match <- match |>
+#   filter(label == 1)
+# train_os <- rbind(train_os, match)
+# 
+# train_os |>
+#   count(label) # a bit better now, 175/666
+
+################################################################################
 spacy_initialize(model = "nb_core_news_sm")
 no_we <- read.table("C:/Users/sirifris.ADA/OneDrive - OsloMet/Dokumenter/no.wiki.bpe.vs50000.d200.w2v.txt", header = FALSE, sep = " ", quote = "", encoding = "UTF-8")
 no_we <- no_we |>
@@ -64,10 +69,8 @@ no_we$V1 <- gsub("▁", "", no_we$V1)
 
 ################################################################################
 ## TRAINING SVM MODEL
-
-covid_recipe <- recipe(label~tweet, data = covid_os) |>
+covid_recipe <- recipe(label~tweet, data = covid) |>
   step_tokenize(tweet, engine = "spacyr") |>
-  # step_date(date, features = c("year", "month")) |>
   step_stopwords(tweet, language = "no", keep = FALSE, 
                  stopword_source = "snowball", 
                  custom_stopword_source = custom_words) |>
@@ -85,54 +88,61 @@ svm_model <- svm(formula = label~.,
                  data = new_train,
                  type = "C-classification",
                  kernel = "radial",
-                 cross = 5,
+                 cross = 5, 
                  probability = TRUE)
 
 test_svm <- predict(svm_model, new_test)
 test_svm <- bind_cols(new_test, test_svm)
 test_svm |>
-  accuracy(truth = label, estimate = ...202) # 0.910
+  accuracy(truth = label, estimate = ...202) # 0.929
 
 cm_svm_test <- confusionMatrix(table(new_test$label, test_svm$...202)) 
-cm_svm_test$byClass["F1"] # 0.9459
+cm_svm_test$byClass["F1"] # 0.963145  
 
 new_test |>
   bind_cols(predict(svm_model, new_test)) |>
   conf_mat(truth = label, estimate = ...202) |>
-  autoplot(type = "heatmap") # 1 FP, 18 FN
+  autoplot(type = "heatmap") # 0 FP, 15 FN (0 TP)
 
 ################################################################################
 ## Tuning time
+
+ctrl <- tune.control(sampling = "cross",
+                     cross = 5,
+                     performances = TRUE,
+                     best.model = TRUE)
+
 set.seed(1234)
 svm_tune <- tune.svm(x = label ~., 
                      data = new_train,
-                     gamma = 10^(-3:3), 
-                     cost = c(0.01, 0.1, 1, 10, 100, 1000),  
-                     kernel = "radial")
+                     gamma = 10^(-3:3),
+                     class.weights = c("misinfo" = 8.219, "non.misinfo" = 0.677),  
+                     kernel = "radial",
+                     tunecontrol = ctrl)
 
-svm_tune$best.parameters$gamma # 0.1
-svm_tune$best.parameters$cost # 1
+svm_tune$best.parameters$gamma # 0.001
+svm_tune$best.parameters$class.weights # 1
 
 set.seed(1234)
 svm_tune_2 <- tune.svm(x = label ~., 
                        data = new_train,
-                       gamma = seq(0,0.1, by = 0.01), 
-                       cost = seq(0.1,2, by = 0.1), 
+                       gamma = seq(0,0.001, by = 0.0001), 
+                       cost = seq(1,10, by = 1), 
                        kernel = "radial")
 
-svm_tune_2$best.parameters$gamma # 0.07
-svm_tune_2$best.parameters$cost # 0.9
+svm_tune_2$best.parameters$gamma # 0
+svm_tune_2$best.parameters$cost # 1
 
 ################################################################################
 ## Training the finished model
+
 set.seed(1234)
 svm_model <- svm(formula = label~.,
                  data = new_train,
                  type = "C-classification",
                  kernel = "radial",
                  cross = 5,
-                 gamma = 0.07,
-                 cost = 0.9,
+                 class.weights = c("misinfo" = 8.219, "non.misinfo" = 0.677),
                  probability = TRUE)
 
 model_svm <- new_test |>
@@ -142,20 +152,35 @@ svm_pred <- predict(svm_model, new_test)
 svm_pred <- bind_cols(test, svm_pred)
 
 cm_svm <- confusionMatrix(table(new_test$label, model_svm$...202)) 
-cm_svm$byClass["F1"] # 0.9681159 
-cm_svm$byClass["Precision"] # 1
-cm_svm$byClass["Recall"] # 0.8030303
+cm_svm$byClass["F1"] # 0.4166667   
+cm_svm$byClass["Precision"] # 0.3333333 
+cm_svm$byClass["Recall"] # 0.5555556 
 
 new_test |>
   bind_cols(predict(svm_model, new_test)) |>
   conf_mat(truth = label, estimate = ...202) |>
-  autoplot(type = "heatmap") # 0 FP, 11 FN
+  autoplot(type = "heatmap") # 0 FP, 15 FN (no TP)
 
 ################################################################################
 ## TRAINING RANDOM FOREST
-control <- trainControl(method = "cv",
-                        number = 5,
-                        search = "grid")
+ctrl <- trainControl(method = "repeatedcv",
+                     number = 5, 
+                     repeats = 2,
+                     summaryFunction = prSummary,
+                     classProbs = TRUE,
+                     verboseIter = TRUE,
+                     search = "grid")
+
+model_weights <- ifelse(new_train$label == "non.misinfo",
+                        1052/(table(new_train$label)[1] * 2),
+                        1052/(table(new_train$label)[2] * 2))
+
+rf_model <- train(label~.,
+                  data = new_train,
+                  method = "rf",
+                  weights = model_weights,
+                  metric = "F",
+                  trControl = ctrl)
 
 set.seed(1234)
 rf_default <- train(label~., 
@@ -164,19 +189,19 @@ rf_default <- train(label~.,
                     metric = "Accuracy", 
                     maximize = TRUE,
                     trControl = control)
-rf_default # mtry = 2, acc = 0.95959
+rf_default # mtry = 2, acc = 0.9239071    
 
-tunegrid <- expand.grid(.mtry = 1:30)
-rf_grid <- train(label~., 
-                 data = new_train, 
-                 method = "rf",
-                 metric = "Accuracy", 
-                 maximize = TRUE,
-                 tuneGrid = tunegrid)
+tunegrid <- expand.grid(.mtry = 20:50)
+rf_grid2 <- train(label~., 
+                  data = new_train, 
+                  method = "rf",
+                  metric = "Accuracy", 
+                  maximize = TRUE,
+                  tuneGrid = tunegrid)
 
-print(rf_grid) # 14 acc = 0.9463241    
+print(rf_grid2) # 49 acc = 0.9206235
 
-best_mtry <- 7
+best_mtry <- 49
 best_grid <- expand.grid(.mtry = best_mtry)
 
 store_maxtrees <- list()
@@ -184,8 +209,9 @@ for (ntree in c(50, 100, 200, 400, 500, 1000)) {
   set.seed(1234)
   rf_maxtrees <- train(label~.,
                        data = new_train,
-                       method = "rf",
-                       metric = "Accuracy",
+                       method = "rf",                  
+                       weights = model_weights,
+                       metric = "F",
                        tuneGrid = best_grid,
                        trControl = control,
                        importance = TRUE,
@@ -200,9 +226,10 @@ summary(results_tree) # 200, acc = 0.9761905
 rf_model <- train(label~.,
                   data = new_train,
                   method = "rf",
-                  metric = "Accuracy",
+                  metric = "F",
+                  weights = model_weights,
                   tuneGrid = best_grid,
-                  trControl = control,
+                  trControl = ctrl,
                   importance = TRUE,
                   nodesize = 1,
                   ntree = 200)
@@ -214,26 +241,38 @@ rf_pred <- predict(rf_model, new_test)
 rf_pred <- bind_cols(test, rf_pred)
 
 cm_rf <- confusionMatrix(table(new_test$label, model_rf$...202)) 
-cm_rf$byClass["F1"] # 0.9681159  
+cm_rf$byClass["F1"] # 0.963145   
 cm_rf$byClass["Precision"] # 1 
-cm_rf$byClass["Recall"] # 0.9382022  
+cm_rf$byClass["Recall"] # 0.92891   
 
 new_test |>
   bind_cols(predict(rf_model, new_test)) |>
   conf_mat(truth = label, estimate = ...202) |>
-  autoplot(type = "heatmap") # 0 FP, 11 FN
+  autoplot(type = "heatmap") # 0 FP, 15 FN
+
+cw <- c(0.677, 8.219)
+rf_model <- randomForest(formula = label~.,
+                         data = new_train,
+                         classwt = cw)
+ss <- c(64,64)
+cw <- c(0.677, 8.219)
+rf_model_samp <- randomForest(formula = label~.,
+                              data = new_train,
+                              sampsize = ss,
+                              classwt = cw)
 
 ################################################################################
 ## TRAINING LOGISTIC REGRESSION
 
 # creating a new recipe, no prep
-reg_recipe <- recipe(label~tweet, data=covid_os) |>
+reg_recipe <- recipe(label~tweet, data=covid) |>
   step_tokenize(tweet, engine = "spacyr") |>
   step_stopwords(tweet, language = "no", keep = FALSE, 
                  stopword_source = "snowball", 
                  custom_stopword_source = custom_words) |>
   step_lemma(tweet) |>
-  step_word_embeddings(tweet, embeddings = no_we)
+  step_
+step_word_embeddings(tweet, embeddings = no_we)
 
 ## Ridge penalty
 ridge_spec <- logistic_reg(penalty = 0.01, mixture = 0) |>
@@ -250,12 +289,12 @@ ridge_preds <- predict(ridge_fit, test)
 ridge_preds <- bind_cols(test, ridge_preds)
 
 ridge_preds |>
-  accuracy(truth = label, estimate = .pred_class) # 0.877
+  accuracy(truth = label, estimate = .pred_class) # 0.924
 
 test |>
   bind_cols(predict(ridge_fit, test)) |>
   conf_mat(truth = label, estimate = .pred_class) |>
-  autoplot(type = 'heatmap') # 9 FN, 17 FP
+  autoplot(type = 'heatmap') # 4 FP, 13 FN
 
 ## LASSO penalty
 lasso_spec <- logistic_reg(penalty = 0.01, mixture = 1) |>
@@ -272,12 +311,12 @@ lasso_preds <- predict(lasso_fit, test)
 lasso_preds <- bind_cols(test, lasso_preds)
 
 lasso_preds |>
-  accuracy(truth = label, estimate = .pred_class) # 0.863
+  accuracy(truth = label, estimate = .pred_class) # 0.929
 
 test |>
   bind_cols(predict(lasso_fit, test)) |>
   conf_mat(truth = label, estimate = .pred_class) |>
-  autoplot(type = 'heatmap') # 12 FP, 17 FN
+  autoplot(type = 'heatmap') # 0 FP, 15 FN
 
 ## Tuning LASSO
 set.seed(1234)
@@ -313,13 +352,11 @@ lasso_tune_preds <- test |>
   bind_cols(predict(final_lasso, test))
 
 cm_lasso <- confusionMatrix(table(test$label, lasso_tune_preds$.pred_class)) 
-cm_lasso$byClass["F1"] # 0.9130435  
-cm_lasso$byClass["Precision"] # 0.8802395  
-cm_lasso$byClass["Recall"] # 0.9483871  
+cm_lasso$byClass["F1"] # 0.963145   
+cm_lasso$byClass["Precision"] # 1  
+cm_lasso$byClass["Recall"] # 0.92891   
 
 test |>
   bind_cols(predict(final_lasso, test)) |>
   conf_mat(truth = label, estimate = .pred_class) |>
   autoplot(type = 'heatmap') # 20 FP, 8 FN
-
-
