@@ -1,5 +1,5 @@
 ---
-title: "Manually labelled sample with word embeddings"
+title: "Manually labelled sample with class weights"
 author: "Siri Frisli"
 output:
   html_notebook:
@@ -81,7 +81,7 @@ train |>
 Initializing spacyr environment and loading the pre-trained word embeddings
 ```{r}
 spacy_initialize(model = "nb_core_news_sm")
-no_we <- fread("C:/Users/sirifris.ADA/OneDrive - OsloMet/Dokumenter/model.txt", 
+no_we <- fread("~/INORK/SVM_ST/model.txt", 
                     skip = 1, header = FALSE, sep = " ", quote = "", encoding = "UTF-8")
 no_we <- no_we |>
   as_tibble()
@@ -126,16 +126,16 @@ model_svm <- new_test |>
   bind_cols(predict(svm_model, new_test))
 
 cm_svm <- confusionMatrix(table(new_test$label, model_svm$...302)) 
-cm_svm$byClass["F1"] # 0.5384615    
-cm_svm$byClass["Precision"] # 0.4666667  
-cm_svm$byClass["Recall"] # 0.6363636 
+cm_svm$byClass["F1"] # 0.2857143    
+cm_svm$byClass["Precision"] # 0.3333333  
+cm_svm$byClass["Recall"] # 0.25 
 ```
 
 ```{r}
 new_test |>
   bind_cols(predict(svm_model, new_test)) |>
-  conf_mat(truth = label, estimate = ...202) |>
-  autoplot(type = "heatmap") # 8 FN, 4 FP
+  conf_mat(truth = label, estimate = ...302) |>
+  autoplot(type = "heatmap")
 ```
 # Recipe: logistic reg and gradient boosted trees
 ## Weights
@@ -199,9 +199,9 @@ lr_preds <- test |>
   bind_cols(predict(lr_final_fit, test))
 
 cm_lr <- confusionMatrix(table(test$label, lr_preds$.pred_class)) 
-cm_lr$byClass["F1"] # 0.3829787  
-cm_lr$byClass["Precision"] # 0.6  
-cm_lr$byClass["Recall"] # 0.28125  
+cm_lr$byClass["F1"] # 0.2739726  
+cm_lr$byClass["Precision"] # 0.6666667  
+cm_lr$byClass["Recall"] # 0.1724138  
 ```
 
 ```{r}
@@ -262,9 +262,9 @@ bt_preds <- test |>
   bind_cols(predict(bt_final_fit, test))
 
 cm_bt <- confusionMatrix(table(test$label, bt_preds$.pred_class)) 
-cm_bt$byClass["F1"] # 0.3529412 
-cm_bt$byClass["Precision"] #0.4 
-cm_bt$byClass["Recall"] #0.3157895 
+cm_bt$byClass["F1"] # 0.2857143 
+cm_bt$byClass["Precision"] # 0.6
+cm_bt$byClass["Recall"] # 0.1875 
 ```
 
 ```{r}
