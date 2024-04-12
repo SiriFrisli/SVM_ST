@@ -1,0 +1,229 @@
+---
+title: "Self-training classification round 6"
+author: "Siri Frisli"
+output:
+  html_notebook:
+    toc: yes
+    number_sections: yes
+    toc_depth: '3'
+    toc_float:
+      collapsed: no
+    df_print: paged
+---
+
+```{r setup, include = FALSE}
+packages <- c("tidyverse", "tidymodels", "readxl", "ROSE", "recipes", "textrecipes",
+              "e1071", "caret", "glmnet", "spacyr", "textdata", "xgboost")
+ 
+for (package in packages) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package,
+                     dependencies = TRUE,
+                     repos='http://cran.us.r-project.org')
+  }
+}
+
+for (package in packages){
+  library(package, character.only = TRUE)
+}
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Loading the data
+```{r}
+covid <- readRDS("D:/Data/Training samples/misinformation_class_5.RDS")
+stopwords <- read_xlsx("~/INORK/INORK_R/Processing/stopwords.xlsx")
+custom_words <- stopwords |>
+  pull(word)
+```
+
+Creating the splits:
+```{r}
+set.seed(1234)
+covid_split <- initial_split(covid, prop = 0.8, strata = label)
+train <- training(covid_split)
+test <- testing(covid_split)
+```
+
+Initializing spacyr environment and loading the pre-trained word embeddings (norwegian bokmål)
+```{r}
+spacy_initialize(model = "nb_core_news_sm")
+no_we <- read.table("C:/Users/sirifris.ADA/OneDrive - OsloMet/Dokumenter/no.wiki.bpe.vs50000.d200.w2v.txt", 
+                    header = FALSE, sep = " ", quote = "", encoding = "UTF-8")
+no_we <- no_we |>
+  as_tibble()
+no_we$V1 <- gsub("▁", "", no_we$V1)
+```
+
+# Recipe
+```{r}
+covid_recipe <- recipe(label~tweet, data = train) |>
+  step_tokenize(tweet, engine = "spacyr") |>
+  step_stopwords(tweet, language = "no", keep = FALSE, 
+                 stopword_source = "snowball", 
+                 custom_stopword_source = custom_words) |>
+  step_lemma(tweet) |>
+  step_word_embeddings(tweet, embeddings = no_we) |>
+  step_normalize(all_numeric_predictors()) |>
+  prep()
+
+new_train <- bake(covid_recipe, new_data = train)
+new_test <- bake(covid_recipe, new_data = test)
+```
+
+# SVM
+Checking the default model first
+```{r}
+set.seed(1234)
+svm_model <- svm(formula = label~.,
+                 data = new_train,
+                 type = "C-classification",
+                 kernel = "radial",
+                 cross = 5,
+                 probability = TRUE)
+```
+
+```{r}
+model_svm <- new_test |>
+  bind_cols(predict(svm_model, new_test))
+
+cm_svm <- confusionMatrix(table(new_test$label, model_svm$...202)) 
+cm_svm$byClass["F1"] # 0.8938547    
+cm_svm$byClass["Precision"] # 0.9160305   
+cm_svm$byClass["Recall"] # 0.8727273   
+```
+
+## Tuning
+```{r}
+set.seed(1234)
+svm_tune <- tune.svm(x = label ~., 
+                     data = new_train,
+                     gamma = 10^(-3:3), 
+                     cost = seq(1,10, by = 1),  
+                     kernel = "radial")
+
+svm_tune$best.parameters$gamma # 
+svm_tune$best.parameters$cost # 
+```
+
+```{r}
+# set.seed(1234)
+# svm_tune <- tune.svm(x = label ~., 
+#                      data = new_train,
+#                      gamma = c(0.001, 0.005, 0.01, 0.05, 0.1, 0.5), 
+#                      cost = seq(5,15, by = 1),  
+#                      kernel = "radial")
+# 
+# svm_tune$best.parameters$gamma # 
+# svm_tune$best.parameters$cost # 
+```
+
+## Finished model
+```{r}
+set.seed(1234)
+svm_model <- svm(formula = label~.,
+                 data = new_train,
+                 type = "C-classification",
+                 kernel = "radial",
+                 cross = 5,
+                 gamma = svm_tune$best.parameters$gamma,
+                 cost = svm_tune$best.parameters$cost,
+                 probability = TRUE)
+```
+
+```{r}
+model_svm <- new_test |>
+  bind_cols(predict(svm_model, new_test))
+
+cm_svm <- confusionMatrix(table(new_test$label, model_svm$...202)) 
+cm_svm$byClass["F1"] #  
+cm_svm$byClass["Precision"] #  
+cm_svm$byClass["Recall"] #  
+```
+
+```{r}
+new_test |>
+  bind_cols(predict(svm_model, new_test)) |>
+  conf_mat(truth = label, estimate = ...202) |>
+  autoplot(type = "heatmap")
+```
+
+# Loading and preprocessing full dataset
+```{r}
+covid_df <- readRDS("D:/Data/covid_relevant_nort_domain.RDS")
+
+match <- subset(covid, (covid$id %in% covid_df$id))
+covid_df <- covid_df |>
+  anti_join(match, by = "id") |>
+  rename(tweet = text)
+```
+
+```{r}
+covid_df <- covid_df |>
+  sample_n(50000, seed = 3)
+```
+
+```{r}
+removeURL <- function(tweet) {
+  return(gsub("http\\S+", "", tweet))
+}
+
+removeUsernames <- function(tweet) {
+  return(gsub("@[a-z,A-Z,_]*[0-9]*[a-z,A-Z,_]*[0-9]*", "", tweet))
+}
+
+covid_df$tweet <- apply(covid_df["tweet"], 1, removeURL)
+covid_df$tweet <- apply(covid_df["tweet"], 1, removeUsernames)
+
+covid_df$tweet <- tolower(covid_df$tweet)
+covid_df$tweet <- gsub("[[:punct:]]", " ", covid_df$tweet)
+# covid_df$tweet <- str_replace_all(covid_df$tweet, "[0-9]", "")
+```
+
+## SVM on the new sample
+```{r}
+covid_df_baked <- bake(covid_recipe, new_data = covid_df)
+
+covid_df_pred <- predict(svm_model, covid_df_baked, probability = TRUE)
+covid_df_pred_probs <- attr(covid_df_pred, "probabilities")
+covid_df_pred_probs <- covid_df_pred_probs |>
+  as.data.frame()
+```
+
+```{r}
+covid_pred_df <- bind_cols(covid_df, covid_df_pred_probs)
+covid_pred_df <- covid_pred_df |>
+  filter(non.misinfo > 0.99 | misinfo > 0.98)
+```
+
+```{r}
+covid_pred_df_label <- covid_pred_df |>
+  mutate(label = case_when(
+    misinfo > 0.98 ~ "misinfo",
+    non.misinfo > 0.99 ~ "non.misinfo"
+  ))
+```
+
+```{r}
+covid_pred_df_label <- covid_pred_df_label |>
+  select(tweet, label, id, conversation_id)
+```
+
+```{r}
+covid_pred_df_label |>
+  count(label)
+```
+
+Merging the two datasets and saving it as a new training sample
+```{r}
+covid_predicted <- full_join(covid, covid_pred_df_label)
+
+covid_predicted |>
+  count(label)
+```
+
+```{r}
+saveRDS(covid_predicted, "D:/Data/Training samples/misinformation_class_6.RDS")
+```
+

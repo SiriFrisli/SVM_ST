@@ -1,5 +1,5 @@
 ---
-title: "Case weight testing"
+title: "Manually labelled sample with word embeddings"
 author: "Siri Frisli"
 output:
   html_notebook:
@@ -13,7 +13,7 @@ output:
 
 ```{r setup, include = FALSE}
 packages <- c("tidyverse", "tidymodels", "readxl", "ROSE", "recipes", "textrecipes",
-              "e1071", "caret", "glmnet", "spacyr", "textdata")
+              "e1071", "caret", "glmnet", "spacyr", "textdata", "xgboost")
  
 for (package in packages) {
   if (!require(package, character.only = TRUE)) {
@@ -65,7 +65,7 @@ covid$tweet <- gsub("[[:punct:]]", " ", covid$tweet)
 # covid$tweet <- str_replace_all(covid$tweet, "[0-9]", "")
 ```
 
-Splitting the data
+## Splits
 ```{r}
 set.seed(1234)
 covid_split <- initial_split(covid, prop = 0.8, strata = label)
@@ -79,6 +79,7 @@ train |>
   count(label) 
 ```
 
+# Weights, recipe and model specifications
 Initializing spacyr environment and loading the pre-trained word embeddings
 ```{r}
 spacy_initialize(model = "nb_core_news_sm")
@@ -89,28 +90,19 @@ no_we <- no_we |>
 no_we$V1 <- gsub("▁", "", no_we$V1)
 ```
 
-# Creating the recipe
-
-Adding weights
+## Creating the weights
+Using class weights, with the inverse class frequency method
+```{r}
+841/(table(train$label)[1] * 2)
+841/(table(train$label)[2] * 2)
+```
 ```{r}
 train <- train |>
-  mutate(case_wts = ifelse(label == "misinfo", 8.2,0.6),
+  mutate(case_wts = ifelse(label == "misinfo", 6.57,0.54),
          case_wts = importance_weights(case_wts))
 ```
 
-5-fold cross validation
-```{r}
-set.seed(8008)
-folds <- vfold_cv(train, strata = label, v = 5, repeats = 2)
-```
-
-Log rec spec 
-```{r}
-lr_spec <- logistic_reg(penalty = tune(), mixture = 1) |>
-  set_engine("glmnet")
-```
-
-The recipe
+## Recipe
 ```{r}
 covid_recipe <- recipe(label~tweet+case_wts, data = train) |>
   step_tokenize(tweet, engine = "spacyr") |>
@@ -119,11 +111,18 @@ covid_recipe <- recipe(label~tweet+case_wts, data = train) |>
                  custom_stopword_source = custom_words) |>
   step_lemma(tweet) |>
   step_word_embeddings(tweet, embeddings = no_we) |>
-  step_ns(starts_with("non_linear"), deg_free = 10) |>
   step_normalize(all_numeric_predictors())
 
 covid_recipe
 ```
+
+# Model: Logistic regression
+```{r}
+lr_spec <- logistic_reg(penalty = tune(), mixture = 1) |>
+  set_mode("classification") |>
+  set_engine("glmnet") 
+```
+
 ```{r}
 lr_workf <- workflow() |>
   add_model(lr_spec) |>
@@ -131,10 +130,11 @@ lr_workf <- workflow() |>
   add_case_weights(case_wts)
 lr_workf
 ```
-# Testing the weights
 ```{r}
-cls_metric <- metric_set(yardstick::precision, yardstick::recall, yardstick::f_meas)
+set.seed(8008)
+folds <- vfold_cv(train, strata = label, v = 5, repeats = 2)
 grid <- tibble(penalty = 10^seq(-3, 0, length.out = 20))
+cls_metric <- metric_set(yardstick::precision, yardstick::recall, yardstick::f_meas)
 ```
 
 ```{r}
@@ -146,15 +146,93 @@ autoplot(lr_res)
 ```
 
 ```{r}
-lr_unwt_workf <- lr_workf |>
-  remove_case_weights()
+show_best(lr_res, metric = "precision")
+```
+```{r}
+lr_params <- select_best(lr_res, metric = "precision")
+
+lr_final_workf <- lr_workf |>
+  finalize_workflow(lr_params)
 ```
 
 ```{r}
-set.seed(3) 
-lr_unwt_res <- lr_unwt_workf |>
-  tune_grid(resamples = folds, grid = grid, metrics = cls_metric)
-
-autoplot(lr_unwt_res)
+set.seed(2)
+lr_final_fit <- fit(lr_final_workf, train)
 ```
-The importance weights seems to do their job, as the balance between the metrics is much better in the weighted analysis 
+
+```{r}
+lr_preds <- test |>
+  bind_cols(predict(lr_final_fit, test))
+```
+
+```{r}
+cm_lr <- confusionMatrix(table(test$label, lr_preds$.pred_class)) 
+cm_lr$byClass["F1"]   
+cm_lr$byClass["Precision"] 
+cm_lr$byClass["Recall"] 
+```
+```{r}
+test |>
+  bind_cols(predict(lr_final_fit, test)) |>
+  conf_mat(truth = label, estimate = .pred_class) |>
+  autoplot(type = "heatmap") 
+```
+
+# Model: Random Forest
+```{r}
+bt_spec <- boost_tree(trees = tune(), min_n = tune(), tree_depth = tune(), loss_reduction = tune(), sample_size = tune()) |>
+  set_mode("classification") |>
+  set_engine("xgboost") 
+```
+
+```{r}
+bt_workf <- workflow() |>
+  add_model(bt_spec) |>
+  add_recipe(covid_recipe) |>
+  add_case_weights(case_wts)
+bt_workf
+```
+```{r}
+set.seed(45)
+bt_control <-control_grid(save_pred = TRUE, save_workflow = TRUE)
+folds <- vfold_cv(train, strata = label, v = 5, repeats = 2)
+```
+
+```{r}
+set.seed(1)
+bt_res <- bt_workf |>
+  tune_grid(resamples = folds, control = bt_control, metrics = cls_metric)
+
+autoplot(bt_res)
+```
+
+```{r}
+bt_params <- select_best(bt_res, metric = "f_meas")
+
+bt_final_workf <- bt_workf |>
+  finalize_workflow(bt_params)
+```
+
+```{r}
+set.seed(2)
+bt_final_fit <- fit(bt_final_workf, train)
+```
+
+```{r}
+bt_preds <- test |>
+  bind_cols(predict(bt_final_fit, test))
+```
+
+```{r}
+cm_bt <- confusionMatrix(table(test$label, bt_preds$.pred_class)) 
+cm_bt$byClass["F1"]   
+cm_bt$byClass["Precision"] 
+cm_bt$byClass["Recall"] 
+```
+
+```{r}
+test |>
+  bind_cols(predict(bt_final_fit, test)) |>
+  conf_mat(truth = label, estimate = .pred_class) |>
+  autoplot(type = "heatmap") 
+```

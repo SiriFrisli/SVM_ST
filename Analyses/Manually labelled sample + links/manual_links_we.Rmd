@@ -1,0 +1,367 @@
+---
+title: "Manually labelled sample + links with word embeddings"
+author: "Siri Frisli"
+output:
+  html_notebook:
+    toc: yes
+    number_sections: yes
+    toc_depth: '3'
+    toc_float:
+      collapsed: no
+    df_print: paged
+---
+
+```{r setup, include = FALSE}
+packages <- c("tidyverse", "tidymodels", "readxl", "ROSE", "recipes", "textrecipes",
+              "e1071", "caret", "glmnet", "spacyr", "textdata", "xgboost")
+ 
+for (package in packages) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package,
+                     dependencies = TRUE,
+                     repos='http://cran.us.r-project.org')
+  }
+}
+
+for (package in packages){
+  library(package, character.only = TRUE)
+}
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Loading and preprocessing data
+```{r}
+covid <- read_xlsx("D:/Data/Training samples/misinformation_labeled.xlsx")
+covid_links <- readRDS("D:/Data/covid_misinfo_links_only.RDS")
+
+stopwords <- read_xlsx("~/INORK/INORK_R/Processing/stopwords.xlsx")
+custom_words <- stopwords |>
+  pull(word)
+```
+
+Checking the balance between classes in the manually labelled sample
+```{r}
+covid |>
+  count(label)
+```
+Need to extract about 900 observations from the link sample
+
+```{r}
+covid_links <- covid_links |>
+  select(-dom_url) |>
+  sample_n(900)
+
+covid <- covid |>
+  select(-c(claim, description, fact_check, date))
+
+covid_full <- rbind(covid_links, covid)
+covid <- covid_full
+
+covid <- covid |>
+  select(tweet = text, label, id)
+
+covid$label <- case_when(
+  covid$label == 0 ~ "non.misinfo",
+  covid$label == 1 ~ "misinfo"
+)
+```
+
+```{r}
+covid |>
+  count(label)
+```
+Now the classes are balanced
+
+```{r}
+removeURL <- function(tweet) {
+  return(gsub("http\\S+", "", tweet))
+}
+
+removeUsernames <- function(tweet) {
+  return(gsub("@[a-z,A-Z,_]*[0-9]*[a-z,A-Z,_]*[0-9]*", "", tweet))
+}
+
+covid$tweet <- apply(covid["tweet"], 1, removeURL)
+covid$tweet <- apply(covid["tweet"], 1, removeUsernames)
+
+covid$label <- as.factor(covid$label) # Outcome variable needs to be factor
+covid$tweet <- tolower(covid$tweet)
+covid$tweet <- gsub("[[:punct:]]", " ", covid$tweet)
+# covid$tweet <- str_replace_all(covid$tweet, "[0-9]", "")
+
+# saveRDS(covid, "D:/Data/manual_links_sample.RDS")
+```
+
+```{r}
+# covid <- readRDS("D:/Data/manual_links_sample.RDS")
+```
+
+
+The splits:
+```{r}
+set.seed(1234)
+covid_split <- initial_split(covid, prop = 0.8, strata = label)
+train <- training(covid_split)
+test <- testing(covid_split)
+```
+
+Initializing spacyr environment and loading the pre-trained word embeddings (norwegian bokmål)
+```{r}
+spacy_initialize(model = "nb_core_news_sm")
+no_we <- fread("C:/Users/sirifris.ADA/OneDrive - OsloMet/Dokumenter/model.txt", 
+                    skip = 1, header = FALSE, sep = " ", quote = "", encoding = "UTF-8")
+no_we <- no_we |>
+  as_tibble()
+```
+
+## Recipe
+```{r}
+covid_recipe <- recipe(label~tweet, data = train) |>
+  step_tokenize(tweet, engine = "spacyr") |>
+  step_stopwords(tweet, language = "no", keep = FALSE, 
+                 stopword_source = "snowball", 
+                 custom_stopword_source = custom_words) |>
+  step_lemma(tweet) |>
+  step_word_embeddings(tweet, embeddings = no_we) |>
+  step_normalize(all_numeric_predictors()) |>
+  prep()
+
+new_train <- bake(covid_recipe, new_data = train)
+new_test <- bake(covid_recipe, new_data = test)
+```
+
+# Model training: SVM
+First checking the performance of the default model
+```{r}
+set.seed(1234)
+svm_model <- svm(formula = label~.,
+                 data = new_train,
+                 type = "C-classification",
+                 kernel = "radial",
+                 cross = 5,
+                 probability = TRUE)
+```
+
+```{r}
+test_svm <- new_test |>
+  bind_cols(predict(svm_model, new_test))
+
+cm_svm_test <- confusionMatrix(table(new_test$label, test_svm$...302)) 
+cm_svm_test$byClass["F1"] # 0.8643216  
+cm_svm_test$byClass["Precision"] # 0.877551  
+cm_svm_test$byClass["Recall"] # 0.8514851  
+```
+
+```{r}
+new_test |>
+  bind_cols(predict(svm_model, new_test)) |>
+  conf_mat(truth = label, estimate = ...302) |>
+  autoplot(type = "heatmap") 
+```
+
+## SVM tuning
+```{r}
+set.seed(1234)
+svm_tune <- tune.svm(x = label ~., 
+                     data = new_train,
+                     gamma = 10^(-3:3), 
+                     cost = seq(1,10, by = 1),  
+                     kernel = "radial")
+
+svm_tune$best.parameters$gamma # 0.001
+svm_tune$best.parameters$cost # 4
+```
+```{r}
+set.seed(1234)
+svm_tune <- tune.svm(x = label ~., 
+                     data = new_train,
+                     gamma = c(0.0001, 0.0005, 0.001, 0.005, 0.01, 0,05, 0.1, 0.5), 
+                     cost = seq(3,5, by = 0.5),  
+                     kernel = "radial")
+
+svm_tune$best.parameters$gamma # 0.001
+svm_tune$best.parameters$cost # 3.5
+```
+
+```{r}
+set.seed(1234)
+svm_model <- svm(formula = label~.,
+                 data = new_train,
+                 type = "C-classification",
+                 kernel = "radial",
+                 cross = 5,
+                 gamma = svm_tune$best.parameters$gamma,
+                 cost = svm_tune$best.parameters$cost,
+                 probability = TRUE)
+```
+
+```{r}
+model_svm <- new_test |>
+  bind_cols(predict(svm_model, new_test))
+
+cm_svm <- confusionMatrix(table(new_test$label, model_svm$...202)) 
+cm_svm$byClass["F1"] # 0.7298578 
+cm_svm$byClass["Precision"] # 0.7857143 
+cm_svm$byClass["Recall"] # 0.6814159 
+```
+```{r}
+new_test |>
+  bind_cols(predict(svm_model, new_test)) |>
+  conf_mat(truth = label, estimate = ...202) |>
+  autoplot(type = "heatmap")
+```
+
+```{r}
+test_preds <- predict(svm_model, new_test, probability = TRUE)
+test_preds <- attr(test_preds, "probabilities")
+test_preds <- test_preds |>
+  as.data.frame() |>
+  select(not_misinfo = "0", misinfo = "1")
+```
+
+```{r}
+test_preds_df <- bind_cols(test, test_preds)
+test_preds_df <- test_preds_df |>
+  filter(not_misinfo > 0.9 | misinfo > 0.85)
+```
+
+```{r}
+test_preds_df <- test_preds_df |>
+  mutate(label = case_when(
+    misinfo > 0.85 ~ "1",
+    not_misinfo > 0.90 ~ "0"
+  ))
+```
+
+
+# Recipe: logistic reg and gradient boosted trees
+
+```{r}
+model_recipe <- recipe(label~tweet, data = train) |>
+  step_tokenize(tweet, engine = "spacyr") |>
+  step_stopwords(tweet, language = "no", keep = FALSE, 
+                 stopword_source = "snowball", 
+                 custom_stopword_source = custom_words) |>
+  step_lemma(tweet) |>
+  step_word_embeddings(tweet, embeddings = no_we) |>
+  step_normalize(all_numeric_predictors())
+
+model_recipe
+```
+
+# Logistic regression
+```{r}
+lr_spec <- logistic_reg(penalty = tune(), mixture = 1) |>
+  set_mode("classification") |>
+  set_engine("glmnet")
+```
+
+```{r}
+lr_workf <- workflow() |>
+  add_model(lr_spec) |>
+  add_recipe(model_recipe) 
+lr_workf
+```
+
+```{r}
+set.seed(8008)
+folds <- vfold_cv(train, strata = label, v = 5, repeats = 2)
+grid <- tibble(penalty = 10^seq(-3, 0, length.out = 20))
+cls_metric <- metric_set(yardstick::precision, yardstick::recall, yardstick::f_meas)
+```
+
+```{r}
+set.seed(1)
+lr_res <- lr_workf |>
+  tune_grid(resamples = folds, grid = grid, metrics = cls_metric)
+```
+
+```{r}
+lr_params <- select_best(lr_res, metric = "f_meas")
+
+lr_final_workf <- lr_workf |>
+  finalize_workflow(lr_params)
+```
+
+```{r}
+set.seed(2)
+lr_final_fit <- fit(lr_final_workf, train)
+
+lr_preds <- test |>
+  bind_cols(predict(lr_final_fit, test))
+
+cm_lr <- confusionMatrix(table(test$label, lr_preds$.pred_class)) 
+cm_lr$byClass["F1"] # 0.7115385 
+cm_lr$byClass["Precision"] # 0.755102 
+cm_lr$byClass["Recall"] # 0.6727273 
+```
+
+```{r}
+test |>
+  bind_cols(predict(lr_final_fit, test)) |>
+  conf_mat(truth = label, estimate = .pred_class) |> 
+  autoplot(type = "heatmap") 
+```
+# Gradient Boosted Trees
+```{r}
+bt_spec <- boost_tree(trees = 500, min_n = tune(), tree_depth = tune(), loss_reduction = tune(), sample_size = tune(), mtry = tune()) |>
+  set_mode("classification") |>
+  set_engine("xgboost") 
+```
+
+```{r}
+bt_workf <- workflow() |>
+  add_model(bt_spec) |>
+  add_recipe(model_recipe)
+bt_workf
+```
+```{r}
+set.seed(45)
+folds <- vfold_cv(train, strata = label, v = 5, repeats = 2)
+```
+
+```{r}
+grid <- grid_latin_hypercube(tree_depth(), 
+                             min_n(), 
+                             loss_reduction(), 
+                             sample_size = sample_prop(), 
+                             finalize(mtry(), train), 
+                             size = 20)
+grid
+```
+
+
+```{r}
+set.seed(1)
+bt_res <- bt_workf |>
+  tune_grid(resamples = folds, grid = grid, control = control_grid(save_pred = TRUE), metrics = cls_metric)
+```
+
+```{r}
+bt_params <- select_best(bt_res, metric = "f_meas")
+
+bt_final_workf <- bt_workf |>
+  finalize_workflow(bt_params)
+```
+
+```{r}
+set.seed(2)
+bt_final_fit <- fit(bt_final_workf, train)
+
+bt_preds <- test |>
+  bind_cols(predict(bt_final_fit, test))
+
+cm_bt <- confusionMatrix(table(test$label, bt_preds$.pred_class)) 
+cm_bt$byClass["F1"] # 0.6968974 
+cm_bt$byClass["Precision"] # 0.744898 
+cm_bt$byClass["Recall"] # 0.6547085 
+```
+
+```{r}
+test |>
+  bind_cols(predict(bt_final_fit, test)) |>
+  conf_mat(truth = label, estimate = .pred_class) |>
+  autoplot(type = "heatmap") 
+```
+

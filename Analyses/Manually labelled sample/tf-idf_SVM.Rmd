@@ -1,5 +1,5 @@
 ---
-title: "Case weight testing"
+title: "Manually labelled sample with tf-idf"
 author: "Siri Frisli"
 output:
   html_notebook:
@@ -11,9 +11,10 @@ output:
     df_print: paged
 ---
 
+
 ```{r setup, include = FALSE}
 packages <- c("tidyverse", "tidymodels", "readxl", "ROSE", "recipes", "textrecipes",
-              "e1071", "caret", "glmnet", "spacyr", "textdata")
+              "e1071", "caret", "glmnet", "spacyr", "textdata", "xgboost")
  
 for (package in packages) {
   if (!require(package, character.only = TRUE)) {
@@ -65,7 +66,7 @@ covid$tweet <- gsub("[[:punct:]]", " ", covid$tweet)
 # covid$tweet <- str_replace_all(covid$tweet, "[0-9]", "")
 ```
 
-Splitting the data
+## Splits
 ```{r}
 set.seed(1234)
 covid_split <- initial_split(covid, prop = 0.8, strata = label)
@@ -79,82 +80,60 @@ train |>
   count(label) 
 ```
 
-Initializing spacyr environment and loading the pre-trained word embeddings
+# Weights and recipe
+Initializing spacyr environment
 ```{r}
 spacy_initialize(model = "nb_core_news_sm")
-no_we <- read.table("C:/Users/sirifris.ADA/OneDrive - OsloMet/Dokumenter/no.wiki.bpe.vs50000.d200.w2v.txt", 
-                    header = FALSE, sep = " ", quote = "", encoding = "UTF-8")
-no_we <- no_we |>
-  as_tibble()
-no_we$V1 <- gsub("▁", "", no_we$V1)
 ```
 
-# Creating the recipe
-
-Adding weights
+## Recipe
 ```{r}
-train <- train |>
-  mutate(case_wts = ifelse(label == "misinfo", 8.2,0.6),
-         case_wts = importance_weights(case_wts))
-```
-
-5-fold cross validation
-```{r}
-set.seed(8008)
-folds <- vfold_cv(train, strata = label, v = 5, repeats = 2)
-```
-
-Log rec spec 
-```{r}
-lr_spec <- logistic_reg(penalty = tune(), mixture = 1) |>
-  set_engine("glmnet")
-```
-
-The recipe
-```{r}
-covid_recipe <- recipe(label~tweet+case_wts, data = train) |>
+covid_recipe <- recipe(label~tweet, data = train) |>
   step_tokenize(tweet, engine = "spacyr") |>
   step_stopwords(tweet, language = "no", keep = FALSE, 
                  stopword_source = "snowball", 
                  custom_stopword_source = custom_words) |>
   step_lemma(tweet) |>
-  step_word_embeddings(tweet, embeddings = no_we) |>
-  step_ns(starts_with("non_linear"), deg_free = 10) |>
-  step_normalize(all_numeric_predictors())
+  step_tokenfilter(tweet, min_times = 3, max_tokens = 1000) |>
+  step_tfidf(tweet) |>
+  step_normalize(all_numeric_predictors()) |>
+  prep()
 
-covid_recipe
+new_train <- bake(covid_recipe, new_data = train)
+new_test <- bake(covid_recipe, new_data = test)
 ```
+
+Calculating the class weights, with the inverse class frequency method
 ```{r}
-lr_workf <- workflow() |>
-  add_model(lr_spec) |>
-  add_recipe(covid_recipe) |>
-  add_case_weights(case_wts)
-lr_workf
-```
-# Testing the weights
-```{r}
-cls_metric <- metric_set(yardstick::precision, yardstick::recall, yardstick::f_meas)
-grid <- tibble(penalty = 10^seq(-3, 0, length.out = 20))
+841/(table(train$label)[1] * 2)
+841/(table(train$label)[2] * 2)
 ```
 
 ```{r}
-set.seed(1)
-lr_res <- lr_workf |>
-  tune_grid(resamples = folds, grid = grid, metrics = cls_metric)
-
-autoplot(lr_res)
+set.seed(1234)
+svm_model <- svm(formula = label~.,
+                 data = new_train,
+                 type = "C-classification",
+                 kernel = "radial",
+                 cross = 5,
+                 class.weights = c("misinfo" = 6.570312, "non.misinfo" = 0.541184),
+                 probability = TRUE)
 ```
 
 ```{r}
-lr_unwt_workf <- lr_workf |>
-  remove_case_weights()
+model_svm <- new_test |>
+  bind_cols(predict(svm_model, new_test))
+
+cm_svm <- confusionMatrix(table(new_test$label, model_svm$...920)) 
+cm_svm$byClass["F1"] #     
+cm_svm$byClass["Precision"] #   
+cm_svm$byClass["Recall"] #  
 ```
 
 ```{r}
-set.seed(3) 
-lr_unwt_res <- lr_unwt_workf |>
-  tune_grid(resamples = folds, grid = grid, metrics = cls_metric)
-
-autoplot(lr_unwt_res)
+new_test |>
+  bind_cols(predict(svm_model, new_test)) |>
+  conf_mat(truth = label, estimate = ...920) |>
+  autoplot(type = "heatmap")
 ```
-The importance weights seems to do their job, as the balance between the metrics is much better in the weighted analysis 
+
