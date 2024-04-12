@@ -13,7 +13,7 @@ output:
 
 ```{r setup, include = FALSE}
 packages <- c("tidyverse", "tidymodels", "readxl", "ROSE", "recipes", "textrecipes",
-              "e1071", "caret", "glmnet", "spacyr", "textdata", "xgboost")
+              "e1071", "caret", "glmnet", "spacyr", "textdata", "xgboost", "data.table")
  
 for (package in packages) {
   if (!require(package, character.only = TRUE)) {
@@ -32,10 +32,10 @@ knitr::opts_chunk$set(echo = TRUE)
 
 # Loading and preprocessing data
 ```{r}
-covid <- read_xlsx("D:/Data/Training samples/misinformation_labeled.xlsx")
-covid_links <- readRDS("D:/Data/covid_misinfo_links_only.RDS")
+covid <- read_xlsx("E:/Data/Training samples/misinformation_labeled.xlsx")
+covid_links <- readRDS("E:/Data/covid_misinfo_links_only.RDS")
 
-stopwords <- read_xlsx("~/INORK/INORK_R/Processing/stopwords.xlsx")
+stopwords <- read_xlsx("~/INORK/Processing/stopwords.xlsx")
 custom_words <- stopwords |>
   pull(word)
 ```
@@ -94,7 +94,7 @@ covid$tweet <- gsub("[[:punct:]]", " ", covid$tweet)
 ```
 
 ```{r}
-# covid <- readRDS("D:/Data/manual_links_sample.RDS")
+# covid <- readRDS("E:/Data/manual_links_sample.RDS")
 ```
 
 
@@ -109,7 +109,7 @@ test <- testing(covid_split)
 Initializing spacyr environment and loading the pre-trained word embeddings (norwegian bokmål)
 ```{r}
 spacy_initialize(model = "nb_core_news_sm")
-no_we <- fread("C:/Users/sirifris.ADA/OneDrive - OsloMet/Dokumenter/model.txt", 
+no_we <- fread("~/SVM_ST/model.txt", 
                     skip = 1, header = FALSE, sep = " ", quote = "", encoding = "UTF-8")
 no_we <- no_we |>
   as_tibble()
@@ -172,6 +172,7 @@ svm_tune <- tune.svm(x = label ~.,
 svm_tune$best.parameters$gamma # 0.001
 svm_tune$best.parameters$cost # 4
 ```
+
 ```{r}
 set.seed(1234)
 svm_tune <- tune.svm(x = label ~., 
@@ -181,7 +182,7 @@ svm_tune <- tune.svm(x = label ~.,
                      kernel = "radial")
 
 svm_tune$best.parameters$gamma # 0.001
-svm_tune$best.parameters$cost # 3.5
+svm_tune$best.parameters$cost # 4.5
 ```
 
 ```{r}
@@ -200,40 +201,17 @@ svm_model <- svm(formula = label~.,
 model_svm <- new_test |>
   bind_cols(predict(svm_model, new_test))
 
-cm_svm <- confusionMatrix(table(new_test$label, model_svm$...202)) 
-cm_svm$byClass["F1"] # 0.7298578 
-cm_svm$byClass["Precision"] # 0.7857143 
-cm_svm$byClass["Recall"] # 0.6814159 
+cm_svm <- confusionMatrix(table(new_test$label, model_svm$...302)) 
+cm_svm$byClass["F1"] # 0.8888889  
+cm_svm$byClass["Precision"] # 0.9183673  
+cm_svm$byClass["Recall"] # 0.861244  
 ```
 ```{r}
 new_test |>
   bind_cols(predict(svm_model, new_test)) |>
-  conf_mat(truth = label, estimate = ...202) |>
+  conf_mat(truth = label, estimate = ...302) |>
   autoplot(type = "heatmap")
 ```
-
-```{r}
-test_preds <- predict(svm_model, new_test, probability = TRUE)
-test_preds <- attr(test_preds, "probabilities")
-test_preds <- test_preds |>
-  as.data.frame() |>
-  select(not_misinfo = "0", misinfo = "1")
-```
-
-```{r}
-test_preds_df <- bind_cols(test, test_preds)
-test_preds_df <- test_preds_df |>
-  filter(not_misinfo > 0.9 | misinfo > 0.85)
-```
-
-```{r}
-test_preds_df <- test_preds_df |>
-  mutate(label = case_when(
-    misinfo > 0.85 ~ "1",
-    not_misinfo > 0.90 ~ "0"
-  ))
-```
-
 
 # Recipe: logistic reg and gradient boosted trees
 
@@ -292,9 +270,9 @@ lr_preds <- test |>
   bind_cols(predict(lr_final_fit, test))
 
 cm_lr <- confusionMatrix(table(test$label, lr_preds$.pred_class)) 
-cm_lr$byClass["F1"] # 0.7115385 
-cm_lr$byClass["Precision"] # 0.755102 
-cm_lr$byClass["Recall"] # 0.6727273 
+cm_lr$byClass["F1"] # 0.8502415  
+cm_lr$byClass["Precision"] # 0.8979592  
+cm_lr$byClass["Recall"] # 0.8073394  
 ```
 
 ```{r}
@@ -303,6 +281,7 @@ test |>
   conf_mat(truth = label, estimate = .pred_class) |> 
   autoplot(type = "heatmap") 
 ```
+
 # Gradient Boosted Trees
 ```{r}
 bt_spec <- boost_tree(trees = 500, min_n = tune(), tree_depth = tune(), loss_reduction = tune(), sample_size = tune(), mtry = tune()) |>
@@ -353,8 +332,8 @@ bt_preds <- test |>
   bind_cols(predict(bt_final_fit, test))
 
 cm_bt <- confusionMatrix(table(test$label, bt_preds$.pred_class)) 
-cm_bt$byClass["F1"] # 0.6968974 
-cm_bt$byClass["Precision"] # 0.744898 
+cm_bt$byClass["F1"] # 0.8461538  
+cm_bt$byClass["Precision"] # 0.8979592  
 cm_bt$byClass["Recall"] # 0.6547085 
 ```
 
