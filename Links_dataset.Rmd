@@ -1,0 +1,81 @@
+---
+title: "Dataset with links classified"
+output: html_notebook
+---
+
+```{r setup, include = FALSE}
+library(tidyverse)
+library(readxl)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+covid_full <- readRDS("E:/Data/covid_relevant_nort_domain.RDS")
+covid_links <- readRDS("E:/Data/covid_misinfo_links_only.RDS")
+```
+
+```{r}
+covid_links <- covid_links |>
+  select(-dom_url)
+
+covid_full <- covid_full |>
+  anti_join(covid_links, by = "id")
+```
+
+```{r}
+covid_full$date <- as.POSIXct(covid_full$created_at, format = "%Y-%m-%dT%H:%M:%S")
+covid_full$date <- format(as.Date(covid_full$date), "%Y-%m")
+```
+
+Removing some unnecessary columns as well
+```{r}
+covid_full <- covid_full |>
+  select(c(id, text, conversation_id, date))
+```
+
+Creating a new df with only the first instance of every unique conversation ID, to make sure that I don't end up with a tweet in the middle of a conversation with no context, in the extracted data set. 
+```{r}
+covid_full <- covid_full[with(covid_full, order(date)), ]
+
+first_tweet <- covid_full[match(unique(covid_full$conversation_id), covid_full$conversation_id), ]
+```
+
+```{r}
+set.seed(1234)
+covid_sample <- first_tweet |>
+  sample_n(size = 4300)
+```
+
+```{r}
+covid_sample$label <- 0
+
+covid_sample <- covid_sample |>
+  select(-date)
+```
+
+```{r}
+covid <- covid_sample |>
+  rbind(covid_links)
+```
+
+```{r}
+removeURL <- function(tweet) {
+  return(gsub("http\\S+", "", tweet))
+}
+
+removeUsernames <- function(tweet) {
+  return(gsub("@[a-z,A-Z,_]*[0-9]*[a-z,A-Z,_]*[0-9]*", "", tweet))
+}
+
+covid$text <- apply(covid["text"], 1, removeURL)
+covid$text <- apply(covid["text"], 1, removeUsernames)
+
+covid$label <- as.factor(covid$label) # Outcome variable needs to be factor
+covid$text <- tolower(covid$text)
+covid$text <- gsub("[[:punct:]]", " ", covid$text)
+```
+
+```{r}
+saveRDS(covid, "E:/Data/covid_links_sample.RDS")
+```
+

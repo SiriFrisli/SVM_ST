@@ -125,7 +125,7 @@ svm_model <- svm(formula = label~.,
 model_svm <- new_test |>
   bind_cols(predict(svm_model, new_test))
 
-cm_svm <- confusionMatrix(table(new_test$label, model_svm$...302)) 
+cm_svm <- confusionMatrix(table(new_test$label, model_svm$...302), positive = "misinfo") 
 cm_svm$byClass["F1"] # 0.2857143    
 cm_svm$byClass["Precision"] # 0.3333333  
 cm_svm$byClass["Recall"] # 0.25 
