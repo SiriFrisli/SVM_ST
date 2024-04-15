@@ -32,7 +32,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 # Loading and preprocessing data
 ```{r}
-covid <- read_xlsx("E:/Data/Training samples/misinformation_labeled.xlsx")
+covid <- read_xlsx("D:/Data/Training samples/misinformation_labeled.xlsx")
 covid <- covid |>
   rename(tweet = text) |>
   select(-c(claim, description, fact_check, date))
@@ -42,7 +42,7 @@ covid$label <- case_when(
   covid$label == 1 ~ "misinfo"
 )
 
-stopwords <- read_xlsx("~/INORK/Processing/stopwords.xlsx")
+stopwords <- read_xlsx("~/INORK_R/Processing/stopwords.xlsx")
 custom_words <- stopwords |>
   pull(word)
 ```
@@ -82,7 +82,7 @@ Need to add about 700 observations to make the training data balanced
 
 ## Adding data
 ```{r}
-covid_links <- readRDS("E:/Data/covid_misinfo_links_only.RDS")
+covid_links <- readRDS("D:/Data/covid_misinfo_links_only.RDS")
 covid_links <- covid_links |>
   rename(tweet = text)
 
@@ -131,7 +131,7 @@ Now the classes are balanced
 Initializing spacyr environment and loading the pre-trained word embeddings (norwegian bokmål)
 ```{r}
 spacy_initialize(model = "nb_core_news_sm")
-no_we <- fread("~/SVM_ST/model.txt", 
+no_we <- fread("~/SVM_ST/model_1.txt", 
                     skip = 1, header = FALSE, sep = " ", quote = "", encoding = "UTF-8")
 no_we <- no_we |>
   as_tibble()
@@ -169,16 +169,16 @@ svm_model <- svm(formula = label~.,
 test_svm <- new_test |>
   bind_cols(predict(svm_model, new_test))
 
-cm_svm_test <- confusionMatrix(table(new_test$label, test_svm$...302)) 
-cm_svm_test$byClass["F1"] # 0.8643216  
-cm_svm_test$byClass["Precision"] # 0.877551  
-cm_svm_test$byClass["Recall"] # 0.8514851  
+cm_svm_test <- confusionMatrix(table(new_test$label, test_svm$...102)) 
+cm_svm_test$byClass["F1"] # 0.2790698   
+cm_svm_test$byClass["Precision"] # 0.4   
+cm_svm_test$byClass["Recall"] # 0.2142857   
 ```
 
 ```{r}
 new_test |>
   bind_cols(predict(svm_model, new_test)) |>
-  conf_mat(truth = label, estimate = ...302) |>
+  conf_mat(truth = label, estimate = ...102) |>
   autoplot(type = "heatmap") 
 ```
 
@@ -192,19 +192,19 @@ svm_tune <- tune.svm(x = label ~.,
                      kernel = "radial")
 
 svm_tune$best.parameters$gamma # 0.001
-svm_tune$best.parameters$cost # 4
+svm_tune$best.parameters$cost # 8
 ```
 
 ```{r}
-set.seed(1234)
-svm_tune <- tune.svm(x = label ~., 
-                     data = new_train,
-                     gamma = c(0.0001, 0.0005, 0.001, 0.005, 0.01, 0,05, 0.1, 0.5), 
-                     cost = seq(3,5, by = 0.5),  
-                     kernel = "radial")
-
-svm_tune$best.parameters$gamma # 0.001
-svm_tune$best.parameters$cost # 4.5
+# set.seed(1234)
+# svm_tune <- tune.svm(x = label ~., 
+#                      data = new_train,
+#                      gamma = c(0.0001, 0.0005, 0.001, 0.005, 0.01, 0,05, 0.1, 0.5), 
+#                      cost = seq(1,10, by = 1),  
+#                      kernel = "radial")
+# 
+# svm_tune$best.parameters$gamma # 
+# svm_tune$best.parameters$cost # 
 ```
 
 ```{r}
@@ -214,8 +214,8 @@ svm_model <- svm(formula = label~.,
                  type = "C-classification",
                  kernel = "radial",
                  cross = 5,
-                 gamma = svm_tune$best.parameters$gamma,
-                 cost = svm_tune$best.parameters$cost,
+                 gamma = 0.001,
+                 cost = 8,
                  probability = TRUE)
 ```
 
@@ -223,10 +223,11 @@ svm_model <- svm(formula = label~.,
 model_svm <- new_test |>
   bind_cols(predict(svm_model, new_test))
 
-cm_svm <- confusionMatrix(table(new_test$label, model_svm$...302)) 
-cm_svm$byClass["F1"] # 0.25   
-cm_svm$byClass["Precision"] # 0.3333333   
-cm_svm$byClass["Recall"] # 0.2   
+cm_svm <- confusionMatrix(table(new_test$label, model_svm$...102)) # these are worse than the default model
+cm_svm$byClass["F1"] # 0.2352941    
+cm_svm$byClass["Precision"] # 0.4   
+cm_svm$byClass["Recall"] # 0.1666667    
+# Use default instead
 ```
 ```{r}
 new_test |>
@@ -234,6 +235,8 @@ new_test |>
   conf_mat(truth = label, estimate = ...302) |>
   autoplot(type = "heatmap")
 ```
+
+
 
 # Recipe: logistic reg and gradient boosted trees
 
@@ -292,9 +295,9 @@ lr_preds <- test |>
   bind_cols(predict(lr_final_fit, test))
 
 cm_lr <- confusionMatrix(table(test$label, lr_preds$.pred_class)) 
-cm_lr$byClass["F1"] # 0.1702128   
-cm_lr$byClass["Precision"] # 0.2666667   
-cm_lr$byClass["Recall"] # 0.125  
+cm_lr$byClass["F1"] # 0.2307692    
+cm_lr$byClass["Precision"] # 0.4    
+cm_lr$byClass["Recall"] # 0.1621622   
 ```
 
 ```{r}
@@ -353,8 +356,8 @@ bt_final_fit <- fit(bt_final_workf, train)
 bt_preds <- test |>
   bind_cols(predict(bt_final_fit, test))
 
-cm_bt <- confusionMatrix(table(test$label, bt_preds$.pred_class)) 
-cm_bt$byClass["F1"] # 0.2264151   
+cm_bt <- confusionMatrix(table(test$label, bt_preds$.pred_class))
+cm_bt$byClass["F1"] # 0.1967213 
 cm_bt$byClass["Precision"] # 0.4   
 cm_bt$byClass["Recall"] # 0.1578947  
 ```

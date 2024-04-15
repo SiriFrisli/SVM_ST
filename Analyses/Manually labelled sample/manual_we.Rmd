@@ -13,7 +13,8 @@ output:
 
 ```{r setup, include = FALSE}
 packages <- c("tidyverse", "tidymodels", "readxl", "ROSE", "recipes", "textrecipes",
-              "e1071", "caret", "glmnet", "spacyr", "textdata", "xgboost", "data.table")
+              "e1071", "caret", "glmnet", "spacyr", "textdata", "xgboost", "data.table",
+              "WeightSVM")
  
 for (package in packages) {
   if (!require(package, character.only = TRUE)) {
@@ -34,7 +35,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ```{r}
 covid <- read_xlsx("D:/Data/Training samples/misinformation_labeled.xlsx")
 
-stopwords <- read_xlsx("~/INORK/INORK_R/Processing/stopwords.xlsx")
+stopwords <- read_xlsx("~/INORK_R/Processing/stopwords.xlsx")
 custom_words <- stopwords |>
   pull(word)
 
@@ -109,6 +110,25 @@ Calculating the class weights, with the inverse class frequency method
 841/(table(train$label)[2] * 2)
 ```
 ## Model training
+
+```{r}
+svm_tune <- tune(svm, 
+              label~., 
+              data = new_train, 
+              kernel="radial", 
+              ranges = list(gamma=c(0, 0.001, 0.01, 0.1, 1), 
+                            cost = c(0.1, 1, 5, 10)),
+              class.weights = c("misinfo" = 6.570312, "non.misinfo" = 0.541184),
+              probability = TRUE,
+              tunecontrol = tune.control(sampling = "cross", 
+                                         cross = 5, 
+                                         sampling.aggregate = mean, 
+                                         best.model = TRUE)
+              )
+svm_tune$best.parameters$gamma
+svm_tune$best.parameters$cost
+```
+
 ```{r}
 set.seed(1234)
 svm_model <- svm(formula = label~.,
@@ -125,23 +145,24 @@ svm_model <- svm(formula = label~.,
 model_svm <- new_test |>
   bind_cols(predict(svm_model, new_test))
 
-cm_svm <- confusionMatrix(table(new_test$label, model_svm$...302), positive = "misinfo") 
-cm_svm$byClass["F1"] # 0.2857143    
-cm_svm$byClass["Precision"] # 0.3333333  
-cm_svm$byClass["Recall"] # 0.25 
+cm_svm <- confusionMatrix(table(new_test$label, model_svm$...102), positive = "misinfo") 
+cm_svm$byClass["F1"] # 0.1395349     
+cm_svm$byClass["Precision"] # 0.2   
+cm_svm$byClass["Recall"] # 0.1071429 
 ```
 
 ```{r}
 new_test |>
   bind_cols(predict(svm_model, new_test)) |>
-  conf_mat(truth = label, estimate = ...302) |>
+  conf_mat(truth = label, estimate = ...102) |>
   autoplot(type = "heatmap")
 ```
+
 # Recipe: logistic reg and gradient boosted trees
 ## Weights
 ```{r}
 train <- train |>
-  mutate(case_wts = ifelse(label == "misinfo", 6.570312 ,0.541184 ),
+  mutate(case_wts = ifelse(label == "misinfo", 6.570312, 0.541184),
          case_wts = importance_weights(case_wts))
 ```
 
@@ -199,9 +220,9 @@ lr_preds <- test |>
   bind_cols(predict(lr_final_fit, test))
 
 cm_lr <- confusionMatrix(table(test$label, lr_preds$.pred_class)) 
-cm_lr$byClass["F1"] # 0.2739726  
-cm_lr$byClass["Precision"] # 0.6666667  
-cm_lr$byClass["Recall"] # 0.1724138  
+cm_lr$byClass["F1"] # 0.3529412   
+cm_lr$byClass["Precision"] # 0.8  
+cm_lr$byClass["Recall"] # 0.2264151  
 ```
 
 ```{r}
@@ -262,9 +283,9 @@ bt_preds <- test |>
   bind_cols(predict(bt_final_fit, test))
 
 cm_bt <- confusionMatrix(table(test$label, bt_preds$.pred_class)) 
-cm_bt$byClass["F1"] # 0.2857143 
-cm_bt$byClass["Precision"] # 0.6
-cm_bt$byClass["Recall"] # 0.1875 
+cm_bt$byClass["F1"] # 0.3529412  
+cm_bt$byClass["Precision"] # 0.4
+cm_bt$byClass["Recall"] # 0.3157895  
 ```
 
 ```{r}

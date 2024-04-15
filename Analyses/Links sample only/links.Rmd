@@ -32,10 +32,12 @@ knitr::opts_chunk$set(echo = TRUE)
 
 # Loading pre-processed data
 ```{r}
-covid <-readRDS("E:/Data/covid_links_sample.RDS")
+covid <-readRDS("D:/Data/covid_links_sample.RDS")
 covid <- covid |>
   rename(tweet = text) |>
-  select(-conversation_id)
+  select(-conversation_id) |>
+  group_by(label) |>
+  sample_n(2000)
 
 covid$label <- case_when(
   covid$label == 0 ~ "non.misinfo",
@@ -44,7 +46,7 @@ covid$label <- case_when(
 
 covid$label <- as.factor(covid$label)
 
-stopwords <- read_xlsx("~/INORK/Processing/stopwords.xlsx")
+stopwords <- read_xlsx("~/INORK/INORK_R/Processing/stopwords.xlsx")
 custom_words <- stopwords |>
   pull(word)
 ```
@@ -66,7 +68,7 @@ train |>
 Initializing spacyr environment and loading the pre-trained word embeddings (norwegian bokmål)
 ```{r}
 spacy_initialize(model = "nb_core_news_sm")
-no_we <- fread("~/SVM_ST/model.txt", 
+no_we <- fread("~/INORK/SVM_ST/model_1.txt", 
                     skip = 1, header = FALSE, sep = " ", quote = "", encoding = "UTF-8")
 no_we <- no_we |>
   as_tibble()
@@ -104,7 +106,7 @@ svm_model <- svm(formula = label~.,
 test_svm <- new_test |>
   bind_cols(predict(svm_model, new_test))
 
-cm_svm_test <- confusionMatrix(table(new_test$label, test_svm$...302)) 
+cm_svm_test <- confusionMatrix(table(new_test$label, test_svm$...102)) 
 cm_svm_test$byClass["F1"] # 0.9083527   
 cm_svm_test$byClass["Precision"] # 0.90625   
 cm_svm_test$byClass["Recall"] # 0.9104651   
@@ -118,13 +120,6 @@ new_test |>
 ```
 
 ## SVM tuning
-
-```{r}
-svmTune <- tune(svm, train.x = label~., data = new_train, kernel='radial',
-                ranges=list(cost=10^(-3:3), gamma=seq(0, 10, 1)))
-```
-
-
 ```{r}
 set.seed(1234)
 svm_tune <- tune.svm(x = label ~., 

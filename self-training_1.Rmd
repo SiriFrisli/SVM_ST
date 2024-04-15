@@ -32,9 +32,9 @@ knitr::opts_chunk$set(echo = TRUE)
 
 Loading the data
 ```{r}
-covid <- read_xlsx("E:/Data/Training samples/misinformation_labeled.xlsx")
+covid <- read_xlsx("D:/Data/Training samples/misinformation_labeled.xlsx")
 
-stopwords <- read_xlsx("~/INORK/Processing/stopwords.xlsx")
+stopwords <- read_xlsx("~/INORK_R/Processing/stopwords.xlsx")
 custom_words <- stopwords |>
   pull(word)
 
@@ -76,59 +76,89 @@ test <- testing(covid_split)
 Initializing spacyr environment and loading the pre-trained word embeddings (norwegian bokmål)
 ```{r}
 spacy_initialize(model = "nb_core_news_sm")
-no_we <- fread("~/SVM_ST/model.txt", 
+no_we <- fread("~/INORK/SVM_ST/model_1.txt", 
                     skip = 1, header = FALSE, sep = " ", quote = "", encoding = "UTF-8")
 no_we <- no_we |>
   as_tibble()
 ```
 
 # Recipe
+Calculate and add weights 
 ```{r}
-covid_recipe <- recipe(label~tweet, data = train) |>
+841/(table(train$label)[1] * 2)
+841/(table(train$label)[2] * 2)
+```
+
+```{r}
+train <- train |>
+  mutate(case_wts = ifelse(label == "misinfo", 6.570312, 0.541184),
+         case_wts = importance_weights(case_wts))
+```
+
+```{r}
+model_recipe <- recipe(label~tweet+case_wts, data = train) |>
   step_tokenize(tweet, engine = "spacyr") |>
   step_stopwords(tweet, language = "no", keep = FALSE, 
                  stopword_source = "snowball", 
                  custom_stopword_source = custom_words) |>
   step_lemma(tweet) |>
   step_word_embeddings(tweet, embeddings = no_we) |>
-  step_normalize(all_numeric_predictors()) |>
-  prep()
+  step_normalize(all_numeric_predictors())
 
-new_train <- bake(covid_recipe, new_data = train)
-new_test <- bake(covid_recipe, new_data = test)
+model_recipe
 ```
 
-Calculating the class weights, with the inverse class frequency method
+# Logistic regression
 ```{r}
-841/(table(train$label)[1] * 2)
-841/(table(train$label)[2] * 2)
-```
-
-# First SVM
-```{r}
-set.seed(1234)
-svm_model <- svm(formula = label~.,
-                 data = new_train,
-                 type = "C-classification",
-                 kernel = "radial",
-                 cross = 5,
-                 class.weights = c("misinfo" = 6.570312, "non.misinfo" = 0.541184),
-                 probability = TRUE)
+lr_spec <- logistic_reg(penalty = tune(), mixture = 1) |>
+  set_mode("classification") |>
+  set_engine("glmnet")
 ```
 
 ```{r}
-model_svm <- new_test |>
-  bind_cols(predict(svm_model, new_test))
+lr_workf <- workflow() |>
+  add_model(lr_spec) |>
+  add_recipe(model_recipe) |>
+  add_case_weights(case_wts)
+lr_workf
+```
 
-cm_svm <- confusionMatrix(table(new_test$label, model_svm$...302)) 
-cm_svm$byClass["F1"] # 0.2857143    
-cm_svm$byClass["Precision"] # 0.3333333    
-cm_svm$byClass["Recall"] # 0.25    
+```{r}
+set.seed(8008)
+folds <- vfold_cv(train, strata = label, v = 5, repeats = 2)
+grid <- tibble(penalty = 10^seq(-3, 0, length.out = 20))
+cls_metric <- metric_set(yardstick::precision, yardstick::recall, yardstick::f_meas)
+```
+
+```{r}
+set.seed(1)
+lr_res <- lr_workf |>
+  tune_grid(resamples = folds, grid = grid, metrics = cls_metric)
+```
+
+```{r}
+lr_params <- select_best(lr_res, metric = "f_meas")
+
+lr_final_workf <- lr_workf |>
+  finalize_workflow(lr_params)
+```
+
+```{r}
+set.seed(2)
+lr_final_fit <- fit(lr_final_workf, train)
+
+lr_preds <- test |>
+  bind_cols(predict(lr_final_fit, test))
+
+cm_lr <- confusionMatrix(table(test$label, lr_preds$.pred_class)) 
+cm_lr$byClass["F1"] # 0.3529412   
+cm_lr$byClass["Precision"] # 0.8  
+cm_lr$byClass["Recall"] # 0.2264151  
 ```
 
 # Loading and preprocessing full dataset
 ```{r}
-covid_df <- readRDS("E:/Data/covid_relevant_nort_domain.RDS")
+covid_df <- readRDS("D:/Data/covid_relevant_nort_domain.RDS")
 
 match <- subset(covid, (covid$id %in% covid_df$id))
 covid_df <- covid_df |>
@@ -138,7 +168,7 @@ covid_df <- covid_df |>
 
 ```{r}
 covid_df <- covid_df |>
-  sample_n(50000, seed = 1234)
+  sample_n(50000, seed = 5678)
 ```
 
 ```{r}
@@ -158,43 +188,39 @@ covid_df$tweet <- gsub("[[:punct:]]", " ", covid_df$tweet)
 # covid_df$tweet <- str_replace_all(covid_df$tweet, "[0-9]", "")
 ```
 
-## SVM on the new sample
+## Logistic regression on the new sample
 ```{r}
-covid_df_baked <- bake(covid_recipe, new_data = covid_df)
-
-covid_df_pred <- predict(svm_model, covid_df_baked, probability = TRUE)
-covid_df_pred_probs <- attr(covid_df_pred, "probabilities")
-covid_df_pred_probs <- covid_df_pred_probs |>
-  as.data.frame()
+set.seed(89)
+lr_preds_all <- covid_df |>
+  bind_cols(predict(lr_final_fit, covid_df, type = "prob"))
 ```
 
 ```{r}
-covid_pred_df <- bind_cols(covid_df, covid_df_pred_probs)
-covid_pred_df <- covid_pred_df |>
-  filter(non.misinfo > 0.9 | misinfo > 0.9)
+lr_preds_all_filtered <- lr_preds_all |>
+  filter(.pred_misinfo > 0.9 | .pred_non.misinfo > 0.9)
 ```
 
 ```{r}
-covid_pred_df_label <- covid_pred_df |>
+lr_preds_all_filtered_label <- lr_preds_all_filtered |>
   mutate(label = case_when(
-    misinfo > 0.9 ~ "misinfo",
-    non.misinfo > 0.9 ~ "non.misinfo"
+    .pred_misinfo > 0.9 ~ "misinfo",
+    .pred_non.misinfo > 0.9 ~ "non.misinfo"
   ))
 ```
 
 ```{r}
-covid_pred_df_label <- covid_pred_df_label |>
-  select(tweet, label, id, conversation_id)
+lr_preds_all_filtered_label <- lr_preds_all_filtered_label |>
+  select(tweet, label, id)
 ```
 
 ```{r}
-covid_pred_df_label |>
+lr_preds_all_filtered_label |>
   count(label)
 ```
 
 Merging the two datasets and saving it as a new training sample
 ```{r}
-covid_predicted <- full_join(covid, covid_pred_df_label)
+covid_predicted <- rbind(covid, lr_preds_all_filtered_label)
 
 covid_predicted |>
   count(label)
