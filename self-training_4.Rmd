@@ -1,0 +1,209 @@
+---
+title: "Self-training classification round 4"
+author: "Siri Frisli"
+output:
+  html_notebook:
+    toc: yes
+    number_sections: yes
+    toc_depth: '3'
+    toc_float:
+      collapsed: no
+    df_print: paged
+---
+
+```{r setup, include = FALSE}
+packages <- c("tidyverse", "tidymodels", "readxl", "ROSE", "recipes", "textrecipes",
+              "e1071", "caret", "glmnet", "spacyr", "textdata", "xgboost", "data.table")
+ 
+for (package in packages) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package,
+                     dependencies = TRUE,
+                     repos='http://cran.us.r-project.org')
+  }
+}
+
+for (package in packages){
+  library(package, character.only = TRUE)
+}
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Loading the data, this has already gone through one round of classification
+```{r}
+covid <- readRDS("E:/Data/Training samples/misinformation_class_3.RDS")
+stopwords <- read_xlsx("~/INORK/Processing/stopwords.xlsx")
+custom_words <- stopwords |>
+  pull(word)
+```
+
+Creating the splits:
+```{r}
+set.seed(1234)
+covid_split <- initial_split(covid, prop = 0.8, strata = label)
+train <- training(covid_split)
+test <- testing(covid_split)
+```
+
+Initializing spacyr environment and loading the pre-trained word embeddings (norwegian bokmål)
+```{r}
+spacy_initialize(model = "nb_core_news_sm")
+no_we <- fread("~/SVM_ST/model_1.txt", 
+                    skip = 1, header = FALSE, sep = " ", quote = "", encoding = "UTF-8")
+no_we <- no_we |>
+  as_tibble()
+```
+
+# Recipe
+Calculate and add weights 
+```{r}
+341593/(table(train$label)[1] * 2)
+341593/(table(train$label)[2] * 2)
+```
+
+```{r}
+train <- train |>
+  mutate(case_wts = ifelse(label == "misinfo", 3.704833, 0.5780072),
+         case_wts = importance_weights(case_wts))
+```
+
+```{r}
+model_recipe <- recipe(label~tweet+case_wts, data = train) |>
+  step_tokenize(tweet, engine = "spacyr") |>
+  step_stopwords(tweet, language = "no", keep = FALSE, 
+                 stopword_source = "snowball", 
+                 custom_stopword_source = custom_words) |>
+  step_lemma(tweet) |>
+  step_word_embeddings(tweet, embeddings = no_we) |>
+  step_normalize(all_numeric_predictors())
+
+model_recipe
+```
+
+# Logistic regression
+```{r}
+lr_spec <- logistic_reg(penalty = tune(), mixture = 1) |>
+  set_mode("classification") |>
+  set_engine("glmnet")
+```
+
+```{r}
+lr_workf <- workflow() |>
+  add_model(lr_spec) |>
+  add_recipe(model_recipe) |>
+  add_case_weights(case_wts)
+lr_workf
+```
+
+```{r}
+set.seed(8008)
+folds <- vfold_cv(train, strata = label, v = 5, repeats = 2)
+grid <- tibble(penalty = 10^seq(-3, 0, length.out = 20))
+cls_metric <- metric_set(yardstick::precision, yardstick::recall, yardstick::f_meas)
+```
+
+```{r}
+set.seed(1)
+lr_res <- lr_workf |>
+  tune_grid(resamples = folds, grid = grid, metrics = cls_metric)
+```
+
+```{r}
+lr_params <- select_best(lr_res, metric = "f_meas")
+
+lr_final_workf <- lr_workf |>
+  finalize_workflow(lr_params)
+```
+
+```{r}
+set.seed(2)
+lr_final_fit <- fit(lr_final_workf, train)
+
+lr_preds <- test |>
+  bind_cols(predict(lr_final_fit, test))
+
+cm_lr <- confusionMatrix(table(test$label, lr_preds$.pred_class)) 
+cm_lr$byClass["F1"] # 0.9707823 
+cm_lr$byClass["Precision"] # 0.9961315 
+cm_lr$byClass["Recall"] # 0.9466912 
+```
+
+# Loading and preprocessing full dataset
+```{r}
+covid_df <- readRDS("E:/Data/covid_relevant_nort_domain.RDS")
+
+# match <- subset(covid, (covid$id %in% covid_df$id))
+covid_df <- covid_df |>
+ # anti_join(match, by = "id") |>
+  rename(tweet = text)
+```
+
+```{r}
+# covid_df <- covid_df |>
+#   sample_n(300000, seed = 700)
+```
+
+```{r}
+removeURL <- function(tweet) {
+  return(gsub("http\\S+", "", tweet))
+}
+
+removeUsernames <- function(tweet) {
+  return(gsub("@[a-z,A-Z,_]*[0-9]*[a-z,A-Z,_]*[0-9]*", "", tweet))
+}
+
+covid_df$tweet <- apply(covid_df["tweet"], 1, removeURL)
+covid_df$tweet <- apply(covid_df["tweet"], 1, removeUsernames)
+
+covid_df$tweet <- tolower(covid_df$tweet)
+covid_df$tweet <- gsub("[[:punct:]]", " ", covid_df$tweet)
+# covid_df$tweet <- str_replace_all(covid_df$tweet, "[0-9]", "")
+```
+
+## Logistic regression on the new sample
+```{r}
+set.seed(123)
+lr_preds_all <- covid_df |>
+  bind_cols(predict(lr_final_fit, covid_df, type = "prob"))
+```
+
+```{r}
+lr_preds_all_filtered <- lr_preds_all |>
+  filter(.pred_misinfo > 0.9 | .pred_non.misinfo > 0.9)
+```
+
+```{r}
+lr_preds_all_filtered_label <- lr_preds_all_filtered |>
+  mutate(label = case_when(
+    .pred_misinfo > 0.9 ~ "misinfo",
+    .pred_non.misinfo > 0.9 ~ "non.misinfo"
+  ))
+```
+
+```{r}
+lr_preds_all_filtered_label <- lr_preds_all_filtered_label |>
+  select(tweet, label, id)
+```
+
+```{r}
+lr_preds_all_filtered_label |>
+  count(label)
+```
+
+Merging the two datasets and saving it as a new training sample
+```{r}
+# match <- subset(covid, (covid$id %in% lr_preds_all_filtered_label$id))
+
+covid_predicted <- full_join(lr_preds_all_filtered_label, covid, by = "id") |>
+  mutate(label = coalesce(label.x, label.y),
+         tweet = coalesce(tweet.x, tweet.y)) |>
+  select(tweet, label, id)
+
+covid_predicted |>
+  count(label)
+```
+
+```{r}
+saveRDS(covid_predicted, "E:/Data/Training samples/misinformation_class_3.RDS")
+```
