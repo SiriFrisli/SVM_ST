@@ -124,9 +124,12 @@ lr_preds <- test |>
   bind_cols(predict(lr_final_fit, test))
 
 cm_lr <- confusionMatrix(table(test$label, lr_preds$.pred_class)) 
-cm_lr$byClass["F1"] # 0.9707823 
-cm_lr$byClass["Precision"] # 0.9961315 
-cm_lr$byClass["Recall"] # 0.9466912 
+cm_lr$byClass["F1"] # 0.9963246  
+cm_lr$byClass["Precision"] # 0.9995662  
+cm_lr$byClass["Recall"] # 0.993104  
+```
+```{r}
+# saveRDS(lr_final_fit, "~/SVM_ST/log_reg_round4.RDS")
 ```
 
 # Loading and preprocessing full dataset

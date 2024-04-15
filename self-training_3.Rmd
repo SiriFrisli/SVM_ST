@@ -32,8 +32,8 @@ knitr::opts_chunk$set(echo = TRUE)
 
 Loading the data, this has already gone through one round of classification
 ```{r}
-covid <- readRDS("D:/Data/Training samples/misinformation_class_2.RDS")
-stopwords <- read_xlsx("~/INORK_R/Processing/stopwords.xlsx")
+covid <- readRDS("E:/Data/Training samples/misinformation_class_2.RDS")
+stopwords <- read_xlsx("~/INORK/Processing/stopwords.xlsx")
 custom_words <- stopwords |>
   pull(word)
 ```
@@ -49,7 +49,7 @@ test <- testing(covid_split)
 Initializing spacyr environment and loading the pre-trained word embeddings (norwegian bokmål)
 ```{r}
 spacy_initialize(model = "nb_core_news_sm")
-no_we <- fread("~/INORK/SVM_ST/model_1.txt", 
+no_we <- fread("~/SVM_ST/model_1.txt", 
                     skip = 1, header = FALSE, sep = " ", quote = "", encoding = "UTF-8")
 no_we <- no_we |>
   as_tibble()
@@ -128,10 +128,13 @@ cm_lr$byClass["F1"] # 0.9707823
 cm_lr$byClass["Precision"] # 0.9961315 
 cm_lr$byClass["Recall"] # 0.9466912 
 ```
+```{r}
+# saveRDS(lr_final_fit, "~/SVM_ST/log_reg_round3.RDS")
+```
 
 # Loading and preprocessing full dataset
 ```{r}
-covid_df <- readRDS("D:/Data/covid_relevant_nort_domain.RDS")
+covid_df <- readRDS("E:/Data/covid_relevant_nort_domain.RDS")
 
 # match <- subset(covid, (covid$id %in% covid_df$id))
 covid_df <- covid_df |>
@@ -140,8 +143,8 @@ covid_df <- covid_df |>
 ```
 
 ```{r}
-covid_df <- covid_df |>
-  sample_n(300000, seed = 700)
+# covid_df <- covid_df |>
+#   sample_n(300000, seed = 700)
 ```
 
 ```{r}
@@ -205,5 +208,5 @@ covid_predicted |>
 ```
 
 ```{r}
-saveRDS(covid_predicted, "D:/Data/Training samples/misinformation_class_3.RDS")
+saveRDS(covid_predicted, "E:/Data/Training samples/misinformation_class_3.RDS")
 ```
