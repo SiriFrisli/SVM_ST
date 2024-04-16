@@ -208,5 +208,5 @@ covid_predicted |>
 ```
 
 ```{r}
-saveRDS(covid_predicted, "E:/Data/Training samples/misinformation_class_3.RDS")
+saveRDS(covid_predicted, "E:/Data/Training samples/misinformation_class_4.RDS")
 ```
